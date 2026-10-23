@@ -162,7 +162,10 @@ function runtimeFixture({
   inventory = {
     workspaceScope: "selected",
     workspaceDir: "/home/node/workspace",
-    registry: { source: "derived", diagnostics: [] },
+    registry: {
+      source: "derived",
+      diagnostics: [{ level: "info", code: "persisted-registry-missing" }],
+    },
     diagnostics: [],
     plugins: [
       {
@@ -271,7 +274,7 @@ function runtimeFixture({
     },
   };
   runInNewContext(NATIVE_GATEWAY_STATE_RECOVERY_RUNTIME, context);
-  return { context, commands, timers, writes, waiting, processGroups, children };
+  return { context, commands, timers, writes, waiting, processGroups, children, inventory };
 }
 
 test("the trusted wrapper confirms only matching holders and keeps native CAS refusal", async () => {
@@ -482,6 +485,67 @@ test("metadata must cover enabled image sources before a new live owner is recor
     assert.equal(fixture.commands[0].args[1], "plugins");
     assert.equal(fixture.context.runtimeGatewayState.liveOwner, undefined);
   }
+});
+
+test("only the known fresh derived-registry information permits qualification", async () => {
+  const missing = { level: "info", code: "persisted-registry-missing" };
+  for (const registry of [
+    { source: "derived", diagnostics: [{ level: "info", code: "unknown-information" }] },
+    { source: "derived", diagnostics: [{ ...missing, level: "warn" }] },
+    { source: "derived", diagnostics: [{ ...missing, level: "error" }] },
+    { source: "derived", diagnostics: [missing, { level: "warn", code: "stale-index" }] },
+    { source: "persisted", diagnostics: [missing] },
+  ]) {
+    const fixture = runtimeFixture();
+    fixture.inventory.registry = registry;
+    await fixture.context.observeNativeGatewayStateOwner();
+    assert.equal(fixture.context.runtimeGatewayState.recovery.state, "manual");
+    assert.equal(fixture.context.runtimeGatewayState.liveOwner, undefined);
+  }
+  const incomplete = runtimeFixture({ configuration: { plugins: { allow: ["codex"] } } });
+  incomplete.inventory.plugins = [];
+  await incomplete.context.observeNativeGatewayStateOwner();
+  assert.equal(incomplete.context.runtimeGatewayState.recovery.state, "manual");
+  const warning = runtimeFixture();
+  warning.inventory.diagnostics = [{ level: "warn", code: "discovery-incomplete" }];
+  await warning.context.observeNativeGatewayStateOwner();
+  assert.equal(warning.context.runtimeGatewayState.recovery.state, "manual");
+});
+
+test("inventory has a separate finite output budget from native lock recovery", async () => {
+  const inventory = runtimeFixture();
+  // Native's actual enabled catalog exceeds 64 KiB even without custom plugins.
+  // Description is an ordinary inventory field ignored by source authorization.
+  inventory.inventory.plugins[0].description = "x".repeat(80 * 1024);
+  await inventory.context.observeNativeGatewayStateOwner();
+  assert.equal(inventory.context.runtimeGatewayState.liveOwner?.ownerId, owner.ownerId);
+  assert.deepEqual(inventory.processGroups, []);
+
+  const oversized = runtimeFixture();
+  oversized.inventory.plugins[0].description = "x".repeat(256 * 1024);
+  await oversized.context.observeNativeGatewayStateOwner();
+  assert.equal(oversized.context.runtimeGatewayState.recovery.state, "manual");
+  assert.equal(oversized.context.runtimeGatewayState.liveOwner, undefined);
+  assert.deepEqual(oversized.processGroups, [[-4242, "SIGKILL"]]);
+
+  const recovery = runtimeFixture({ hangCommand: true });
+  const pending = recovery.context.nativeStateCommand(["gateway", "recover-lock", "--json"]);
+  recovery.children[0].stdout.emit("data", Buffer.alloc(65537, " "));
+  recovery.children[0].emit("close", 0);
+  assert.equal(await pending, undefined);
+  assert.deepEqual(recovery.processGroups, [[-4242, "SIGKILL"]]);
+});
+
+test("native inventory JSON preserves Unicode split across stdout chunks", async () => {
+  const fixture = runtimeFixture({ hangCommand: true });
+  fixture.inventory.plugins[0].description = "capability résumé";
+  const bytes = Buffer.from(JSON.stringify(fixture.inventory));
+  const split = bytes.indexOf(Buffer.from("é")) + 1;
+  const pending = fixture.context.nativeStateCommand(["plugins", "list", "--enabled", "--json"]);
+  fixture.children[0].stdout.emit("data", bytes.subarray(0, split));
+  fixture.children[0].stdout.emit("data", bytes.subarray(split));
+  fixture.children[0].emit("close", 0);
+  assert.equal((await pending).plugins[0].description, "capability résumé");
 });
 
 test("default Codex configurations remain eligible after the OCE-generated overlay", async () => {

@@ -10,6 +10,10 @@ import {
 } from "./native-state-owner.ts";
 import { NATIVE_GATEWAY_COMMAND_TIMEOUT_MS } from "./runtime-startup.ts";
 
+// Bundled inventory includes capability metadata and exceeds a recovery snapshot's
+// budget. Keep its finite allowance separate from commands that inspect custody.
+const NATIVE_PLUGIN_INVENTORY_MAX_BYTES = 256 * 1024;
+
 // Recovery eligibility for OCE's emitted configuration, not plugin permissions.
 export function nativeStatePluginConfigurationEligible(id: string, value: unknown): boolean {
   const config = nativeStateRecord(value);
@@ -473,10 +477,11 @@ if (nativeStateRecoveryEnabled) {
   runtimeStatusObservation = observeNativeGatewayStateOwner;
 }
 
-function nativeStateCommand(args) {
+function nativeStateCommand(args, maximumBytes = 65536) {
   return new Promise((resolve) => {
     const command = spawn("node", ["/app/openclaw.mjs", ...args], { env: gatewayEnvironment(), detached: true, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
+    const chunks = [];
+    let stdoutBytes = 0;
     let oversized = false;
     // The public CLI may respawn its launcher. Bound that owned process group,
     // including descendants that would otherwise keep the output pipe open.
@@ -486,10 +491,11 @@ function nativeStateCommand(args) {
     };
     const timer = setTimeout(kill, ${NATIVE_GATEWAY_COMMAND_TIMEOUT_MS});
     command.stdout.on("data", (chunk) => {
-      if (Buffer.byteLength(stdout) + chunk.length > 65536) {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maximumBytes) {
         oversized = true;
         kill();
-      } else stdout += chunk;
+      } else chunks.push(chunk);
     });
     // Native errors may contain paths or configuration. The status exposes only a fixed state.
     command.stderr.resume();
@@ -497,7 +503,7 @@ function nativeStateCommand(args) {
     command.once("close", (code) => {
       clearTimeout(timer);
       if (code !== 0 || oversized) { resolve(undefined); return; }
-      try { resolve(JSON.parse(stdout)); } catch { resolve(undefined); }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch { resolve(undefined); }
     });
   });
 }
@@ -545,11 +551,17 @@ async function qualifyNativeGatewayStateSources() {
   nativeStateSourcesEligible = false;
   // This supported native command reads manifest/index metadata; it never
   // imports plugin runtimes. Unknown inventories are not evidence of absence.
-  const report = nativeStateRecord(await nativeStateCommand(["plugins", "list", "--enabled", "--json"]));
+  const report = nativeStateRecord(await nativeStateCommand(["plugins", "list", "--enabled", "--json"], ${NATIVE_PLUGIN_INVENTORY_MAX_BYTES}));
   const registry = nativeStateRecord(report?.registry);
+  const registryDiagnostic = nativeStateRecord(registry?.diagnostics?.[0]);
+  // Fresh private state has no saved index. Native derives the complete inventory
+  // and reports this one informational condition; all its source checks still apply.
+  const freshDerivedRegistry = registry?.source === "derived" && registry.diagnostics?.length === 1 &&
+    registryDiagnostic?.level === "info" &&
+    registryDiagnostic.code === "persisted-registry-missing";
   if (report?.workspaceScope !== "selected" || !nativeStateText(report.workspaceDir, 4096) ||
       !["provided", "persisted", "derived"].includes(registry?.source) ||
-      !Array.isArray(registry?.diagnostics) || registry.diagnostics.length !== 0 ||
+      !Array.isArray(registry?.diagnostics) || (registry.diagnostics.length !== 0 && !freshDerivedRegistry) ||
       !Array.isArray(report.diagnostics) || report.diagnostics.length !== 0 ||
       !Array.isArray(report.plugins)) return refuseNativeStateSources();
   const ids = new Set();
