@@ -285,6 +285,41 @@ func TestReadExternalOpenShellManagedSelection(t *testing.T) {
 	}
 }
 
+func TestExternalManagedInstallationPinsTheRemoteHarnessImage(t *testing.T) {
+	state := externalTestState(t)
+	state.openShellExternal.managed = true
+	state.openShellExternal.runtimeImageOverride = "quay.io/example/openclaw-enterprise-runtime@sha256:18fd2d1ad7e99b9ea47e3da2cd91e8ce69b4002c0f0fd7934ca2012bb58cc271"
+	if err := writeInstallation(state, "runtime@"+profileTestDigest, nil, "", "", "10.42.0.1/32"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(state.directory, "installation.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var installation struct {
+		Drivers struct {
+			Compute struct {
+				Configuration struct {
+					Images struct {
+						Gateway string `yaml:"gateway"`
+						Agent   string `yaml:"agent"`
+					} `yaml:"images"`
+				} `yaml:"configuration"`
+			} `yaml:"compute"`
+		} `yaml:"drivers"`
+	}
+	if err := yaml.Unmarshal(data, &installation); err != nil {
+		t.Fatal(err)
+	}
+	images := installation.Drivers.Compute.Configuration.Images
+	if images.Agent != state.openShellExternal.runtimeImageOverride {
+		t.Fatalf("the Harness image must be the registry reference: %s", images.Agent)
+	}
+	if images.Gateway == state.openShellExternal.runtimeImageOverride {
+		t.Fatal("the local Agent Gateway must keep the imported image")
+	}
+}
+
 func TestExternalManagedInstallationRendersManagedSandboxConfiguration(t *testing.T) {
 	state := externalTestState(t)
 	state.openShellExternal.managed = true

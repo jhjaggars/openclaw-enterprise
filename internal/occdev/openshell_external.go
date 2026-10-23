@@ -24,6 +24,10 @@ type externalOpenShell struct {
 	// sandbox-side Kubernetes object, so the profile installs no local OpenShell
 	// assets and renders the managed Sandbox Driver configuration.
 	managed bool
+	// runtimeImageOverride names the Harness image the sandbox cluster must
+	// pull; the local Agent Gateway keeps the k3d-imported image. Required when
+	// the sandbox cluster cannot pull from the local engine.
+	runtimeImageOverride string
 	// addresses and port are the translated exact gateway targets, resolved once
 	// per start for NetworkPolicies, which cannot select hostnames.
 	addresses []string
@@ -92,12 +96,17 @@ func readExternalOpenShell(env map[string]string) (*externalOpenShell, error) {
 	if len(strings.TrimSpace(string(secret))) == 0 {
 		return nil, fmt.Errorf("OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_SECRET_FILE is empty")
 	}
+	override := env["OCC_DEVELOPMENT_OPENSHELL_RUNTIME_IMAGE"]
+	if override != "" && !strings.Contains(override, "@sha256:") {
+		return nil, fmt.Errorf("OCC_DEVELOPMENT_OPENSHELL_RUNTIME_IMAGE must be a digest-pinned image reference")
+	}
 	return &externalOpenShell{
-		endpoint:         origin,
-		oidcTokenURL:     oidc["OCC_DEVELOPMENT_OPENSHELL_OIDC_TOKEN_URL"],
-		oidcClientID:     oidc["OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_ID"],
-		clientSecretPath: secretPath,
-		managed:          mode == "managed",
+		endpoint:             origin,
+		oidcTokenURL:         oidc["OCC_DEVELOPMENT_OPENSHELL_OIDC_TOKEN_URL"],
+		oidcClientID:         oidc["OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_ID"],
+		clientSecretPath:     secretPath,
+		managed:              mode == "managed",
+		runtimeImageOverride: override,
 	}, nil
 }
 

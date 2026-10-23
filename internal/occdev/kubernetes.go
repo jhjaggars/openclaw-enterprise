@@ -405,7 +405,7 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 			"iam":           map[string]any{"id": "native-iam", "configuration": map[string]any{}},
 			"secret":        map[string]any{"id": "secret-kubernetes", "configuration": map[string]any{"authentication": auth}},
 			"compute": map[string]any{"id": "compute-kubernetes", "configuration": map[string]any{
-				"authentication": auth, "images": map[string]any{"gateway": reference, "agent": reference, "requireImmutableDigest": true},
+				"authentication": auth, "images": map[string]any{"gateway": reference, "agent": agentImageReference(s, reference), "requireImmutableDigest": true},
 				"resources":                   map[string]any{"gateway": gatewayResources, "agent": harnessResources, "namespace": map[string]any{"quota": map[string]string{"pods": "10"}, "containerDefaults": resources}},
 				"network":                     map[string]any{"dns": map[string]any{"namespace": "kube-system", "podLabels": map[string]string{"k8s-app": "kube-dns"}}, "gatewayPort": 8080, "gatewayTrustedProxyCidrs": []string{"127.0.0.1/32"}, "pluginStatusProxySourceCidrs": []string{statusProxySource}, "gatewayClients": []any{map[string]any{"namespace": gatewayClientNamespace, "podLabels": map[string]string{"app.kubernetes.io/name": "occ-kubernetes-dev-client"}}}},
 				"servicePrincipalCredentials": map[string]any{"mode": "projectedServiceAccountToken", "audience": "openclaw-enterprise", "expirationSeconds": 900},
@@ -542,6 +542,17 @@ func openShellBackendConfiguration(s *developmentState) map[string]any {
 		},
 		"drivers": map[string]string{"sandbox": openShellSandboxID, "credential_gateway": openShellCredentialGatewayID},
 	}
+}
+
+// agentImageReference names the image the sandbox cluster must pull for the
+// Harness. With an external gateway that cannot reach the local engine, the
+// Installation pins a registry reference; otherwise the Harness runs in the
+// profile's own cluster and uses the imported image.
+func agentImageReference(s *developmentState, imported string) string {
+	if s.openShellExternal != nil && s.openShellExternal.runtimeImageOverride != "" {
+		return s.openShellExternal.runtimeImageOverride
+	}
+	return imported
 }
 
 func openShellOidcAuthConfiguration(external *externalOpenShell) map[string]any {

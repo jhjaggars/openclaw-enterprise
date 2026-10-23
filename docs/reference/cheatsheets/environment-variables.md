@@ -151,6 +151,7 @@ for supported engines, images, and security restrictions.
 - `OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_ID` — OIDC client ID for the external gateway.
 - `OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_SECRET_FILE` — Absolute path to a nonempty file with the OIDC client secret; copied into the private state directory.
 - `OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE` — `managed` to render the managed Sandbox Driver configuration with an external gateway (the gateway owns every sandbox-side Kubernetes object, and the profile installs no local OpenShell assets); default `operator`.
+- `OCC_DEVELOPMENT_OPENSHELL_RUNTIME_IMAGE` — Digest-pinned image reference the sandbox cluster must pull for the Harness when it cannot reach the local engine; the local Agent Gateway keeps the imported image.
 - `OCC_CONTAINER_ENGINE_SOCKET` — Podman API socket; the development helper supplies it automatically.
 - `DOCKER_HOST`, `DOCKER_CONTEXT` — Docker endpoint or named context; an explicit context takes precedence. The Kubernetes profile requires a local `unix:///` socket and records the selected endpoint.
 - `CONTAINER_CONNECTION`, `CONTAINER_HOST` — Podman's connection selection; preserved during Docker-profile cleanup when Podman is the engine.
