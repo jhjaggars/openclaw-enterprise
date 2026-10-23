@@ -97,9 +97,7 @@ async function exists(path) {
 
 function availableInPath(name) {
   const directories = (process.env.PATH ?? "").split(delimiter);
-  return directories.some(
-    (directory) => directory && existsSync(join(directory, name)),
-  );
+  return directories.some((directory) => directory && existsSync(join(directory, name)));
 }
 
 function parseJson(value, description) {
