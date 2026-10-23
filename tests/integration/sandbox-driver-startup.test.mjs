@@ -4009,9 +4009,18 @@ test("OpenShell managed mode rejects operator-only workspace options", async () 
       { subPath: "workspace", mountPath: "/sandbox/enterprise", readOnly: false },
     ],
     ["userNamespaces", true],
+    ["agentResources", { requests: { cpu: "1" } }],
   ]) {
     const configuration = base();
-    if (["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"].includes(key)) {
+    if (
+      [
+        "runtimeClassName",
+        "serviceAccount",
+        "sandboxDataMount",
+        "userNamespaces",
+        "agentResources",
+      ].includes(key)
+    ) {
       configuration.kubernetes[key] = value;
     } else {
       configuration.gateway[key] = value;
@@ -4066,28 +4075,15 @@ test("OpenShell managed mode provisions a Sandbox without OCC-owned pod infrastr
   const sandbox = await driver.provisionHarness(harnessContext);
   assert.equal(creates.length, 1);
   const spec = creates[0].spec;
-  // The gateway owns the RuntimeClass, ServiceAccount, and workspace volume; OCC
-  // sends only the workload and its containment policy.
+  // The gateway owns the Pod's infrastructure entirely: no RuntimeClass, no
+  // driver config, no caller labels or annotations — only the workload and its
+  // containment policy cross the boundary.
   assert.equal(spec.template.runtime_class_name, undefined);
   assert.equal(spec.template.user_namespaces, undefined);
-  // The driver_config Struct wraps each value; unwrap it for the assertions.
-  const unwrap = (value) =>
-    Object.fromEntries(
-      Object.entries(value.fields ?? {}).map(([key, entry]) => [
-        key,
-        entry.structValue !== undefined
-          ? unwrap(entry.structValue)
-          : entry.listValue !== undefined
-            ? entry.listValue.values.map(unwrapValue)
-            : (unwrapValue(entry) ?? null),
-      ]),
-    );
-  const unwrapValue = (entry) => entry.stringValue ?? entry.numberValue ?? entry.boolValue ?? null;
-  const driverConfig = unwrap(spec.template.driver_config);
-  const kubernetes = driverConfig.kubernetes;
-  assert.equal(kubernetes.volumes, undefined);
-  assert.equal(kubernetes.containers.agent.volume_mounts, undefined);
-  assert.ok(kubernetes.containers.agent.resources.limits["ephemeral-storage"]);
+  assert.equal(spec.template.driver_config, undefined);
+  assert.equal(spec.template.labels, undefined);
+  assert.deepEqual(creates[0].labels, {});
+  assert.deepEqual(creates[0].annotations, {});
   // /sandbox is writable workspace state on the gateway's volume, not an OCC mount.
   assert.ok(spec.policy.filesystem.read_write.includes("/sandbox"));
   assert.ok(spec.policy.filesystem.read_write.includes("/sandbox/.openclaw-runtime"));

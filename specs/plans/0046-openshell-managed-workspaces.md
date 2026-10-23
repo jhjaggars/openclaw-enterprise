@@ -137,6 +137,18 @@ recorded here if any require a design choice.
     docs updated for managed mode; operational detail lives in the external
     gateway guide. Remaining: the 0.1.5 live-gateway sandbox probe and a real
     model turn.
+  - Live managed sandbox probe PASSED against the external 0.1.5 gateway
+    (workspace create, CreateSandbox, phase polling to READY in 87 s with the
+    trial runtime image pulled from a public registry, GetService exposure,
+    clean deletion). The probe exposed the strict gateway posture — caller
+    driver config is no longer supported by OpenShell, and caller pod labels
+    and annotations are rejected — so the managed spec was reduced to the
+    workload and its containment policy, and every `kubernetes` option
+    (including `agentResources`) is rejected in managed mode. The advertised
+    service URL domain (`openshell.localhost`) is not yet resolvable from OCC;
+    the operator's platform fix is tracked outside this plan, and harness
+    endpoint routing against a remote gateway is expected to fail until it
+    lands.
 
 ## Manual Notes
 

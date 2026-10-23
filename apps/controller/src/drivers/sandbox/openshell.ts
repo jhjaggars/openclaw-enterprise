@@ -2316,37 +2316,11 @@ function managedSandboxSpec(
   providerEnvironment: ReadonlySet<string> = new Set(),
   workspaceNodeBinding?: WorkspaceNodeBinding,
 ) {
-  const agentResources = configurationObject(
-    options.kubernetes.agentResources ?? {},
-    "OpenShell Agent resource configuration",
-  );
-  const driverConfig = {
-    containers: {
-      agent: {
-        resources: {
-          ...options.kubernetes.agentResources,
-          requests: {
-            ...configurationObject(
-              agentResources.requests ?? {},
-              "OpenShell Agent resource requests",
-            ),
-            "ephemeral-storage": "256Mi",
-          },
-          limits: {
-            ...configurationObject(agentResources.limits ?? {}, "OpenShell Agent resource limits"),
-            "ephemeral-storage": "1Gi",
-          },
-        },
-      },
-    },
-  };
   return {
     log_level: options.logLevel ?? "info",
     environment: environment(requirements, providerEnvironment),
     template: {
       image: requirements.image,
-      labels: { ...requirements.labels },
-      driver_config: { fields: toProtobufStruct({ kubernetes: driverConfig }) },
     },
     policy: {
       version: 1,
@@ -2518,13 +2492,9 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
     // RuntimeClass, the sandbox ServiceAccount, user-namespace support, and the
     // workspace volume behind /sandbox. Accepting an OCC choice for any of them would
     // misstate who owns the sandbox cluster.
-    for (const key of [
-      "runtimeClassName",
-      "serviceAccount",
-      "sandboxDataMount",
-      "userNamespaces",
-    ] as const) {
-      if (options.kubernetes[key] !== undefined) {
+    const kubernetesOptions = options.kubernetes as Readonly<Record<string, unknown>>;
+    for (const key of Object.keys(kubernetesOptions)) {
+      if (kubernetesOptions[key] !== undefined) {
         throw new OpenShellSandboxConfigurationFailure(
           `OpenShell kubernetes option ${key} applies to operator workspace mode; in managed mode the gateway owns the sandbox Pod infrastructure.`,
         );
@@ -3577,25 +3547,25 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     };
     const selector = { name: sandbox.resourceName, workspace };
     const requestIds = createRequestIds(context.revision.id);
+    const managed = this.options.gateway.workspaceMode === "managed";
     const create = {
       ...selector,
-      labels: context.requirements.labels,
-      annotations,
-      spec:
-        this.options.gateway.workspaceMode === "managed"
-          ? managedSandboxSpec(
-              this.options,
-              context.revision,
-              context.requirements,
-              runtimeProvider,
-              new Set([
-                WORKSPACE_NODE_SETUP_ENVIRONMENT,
-                WORKSPACE_NODE_CA_ENVIRONMENT,
-                ...Object.keys(runtimeCredentialMaterial.credentials),
-              ]),
-              runtimeCredentialMaterial.binding,
-            )
-          : sandboxSpec(
+      labels: managed ? {} : context.requirements.labels,
+      annotations: managed ? {} : annotations,
+      spec: managed
+        ? managedSandboxSpec(
+            this.options,
+            context.revision,
+            context.requirements,
+            runtimeProvider,
+            new Set([
+              WORKSPACE_NODE_SETUP_ENVIRONMENT,
+              WORKSPACE_NODE_CA_ENVIRONMENT,
+              ...Object.keys(runtimeCredentialMaterial.credentials),
+            ]),
+            runtimeCredentialMaterial.binding,
+          )
+        : sandboxSpec(
               this.options,
               context.revision,
               context.requirements,
@@ -3618,8 +3588,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
               runtimeCredentialMaterial.binding,
               egressPolicy,
               plugin,
-            ),
-      serviceExposures,
+          ),      serviceExposures,
     };
     if (git && this.options.gateway.workspaceMode === "operator") {
       const operatorSpec = create.spec as ReturnType<typeof sandboxSpec>;
