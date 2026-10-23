@@ -110,9 +110,9 @@ through OpenClaw. The Agent revision records the requested mode, not live
 enforcement: OCC can select the revision before the replacement Gateway starts.
 A successful deployment and a supporting runtime are required to confirm enforcement.
 
-OCE must publish, pin, and qualify an OpenClaw runtime that supports these controls. The
-[default runtime source pin](../../deploy/runtime/Dockerfile) lacks the terminal
-and command-job controls. Compute Drivers must declare managed-mode support.
+The [default runtime source pin](../../deploy/runtime/Dockerfile) includes these
+controls. The deployed runtime must be built from a supporting source and qualified
+for the selected Compute Driver. Compute Drivers must declare managed-mode support.
 Kubernetes requires a configured Gateway runtime; SSH rejects managed revisions.
 See [Docker deployment limits](drivers/docker-compute.md).
 Re-enabling managed mode restores OCE configuration and can discard Gateway-local
