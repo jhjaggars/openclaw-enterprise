@@ -38,6 +38,7 @@ import type {
   ServiceClientConstructor,
 } from "@grpc/grpc-js";
 import type { PackageDefinition } from "@grpc/proto-loader";
+import { OpenShellOidcTokenSource } from "./openshell-oidc-token.ts";
 
 export {
   confirmSandboxAbsent,
@@ -60,6 +61,15 @@ export interface OpenShellGatewayClientOptions {
         readonly mode: "mtls" | "mutualTls";
         readonly certificatePath: string;
         readonly privateKeyPath: string;
+      }
+    | {
+        readonly mode: "oidcClientCredentials";
+        readonly tokenUrl: string;
+        readonly clientId: string;
+        readonly clientSecretPath: string;
+        readonly tokenAuth?: "client_secret_post" | "client_secret_basic";
+        readonly audience?: string;
+        readonly scope?: string;
       };
   readonly requestTimeoutMs?: number;
   /** Bounds one Sandbox deletion: the DeleteSandbox call plus any wait for its completion. */
@@ -1229,8 +1239,16 @@ function ipEndpointCredentials(
 export async function openShellGatewayGrpcMetadata(
   grpc: typeof import("@grpc/grpc-js"),
   auth: OpenShellGatewayClientOptions["auth"],
+  oidc: OpenShellOidcTokenSource | undefined,
 ): Promise<Metadata> {
   const value = new grpc.Metadata();
+  if (auth?.mode === "oidcClientCredentials") {
+    if (oidc === undefined) {
+      throw new OpenShellGatewayFailure("OpenShell OIDC token source is unavailable.");
+    }
+    value.set("authorization", `Bearer ${await oidc.accessToken()}`);
+    return value;
+  }
   if (auth?.mode !== "bearerTokenFile") {
     return value;
   }
@@ -1261,6 +1279,7 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
   private readonly options: OpenShellGatewayClientOptions;
   private readonly requestTimeoutMs: number;
   private readonly sandboxDeleteTimeoutMs: number;
+  private readonly oidc: OpenShellOidcTokenSource | undefined;
   private client:
     | Promise<{
         readonly grpc: typeof import("@grpc/grpc-js");
@@ -1293,6 +1312,17 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
           "OpenShell mTLS certificate and private key paths must be absolute.",
         );
       }
+    }
+    if (options.auth?.mode === "oidcClientCredentials") {
+      this.oidc = new OpenShellOidcTokenSource({
+        tokenUrl: options.auth.tokenUrl,
+        clientId: options.auth.clientId,
+        clientSecretPath: options.auth.clientSecretPath,
+        ...(options.auth.tokenAuth === undefined ? {} : { tokenAuth: options.auth.tokenAuth }),
+        ...(options.auth.audience === undefined ? {} : { audience: options.auth.audience }),
+        ...(options.auth.scope === undefined ? {} : { scope: options.auth.scope }),
+        requestTimeoutMs: this.requestTimeoutMs,
+      });
     }
     if (options.rootCertificatePath !== undefined && !isAbsolute(options.rootCertificatePath)) {
       throw new OpenShellGatewayFailure("OpenShell root certificate path must be absolute.");
@@ -1461,7 +1491,7 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     signal.throwIfAborted();
     const { grpc, client } = await this.ensureClient();
     signal.throwIfAborted();
-    const headers = await openShellGatewayGrpcMetadata(grpc, this.options.auth);
+    const headers = await openShellGatewayGrpcMetadata(grpc, this.options.auth, this.oidc);
     signal.throwIfAborted();
     return new Promise<number>((resolve, reject) => {
       let call: ClientReadableStream<RecordValue> | undefined;
@@ -2576,7 +2606,7 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     signal.throwIfAborted();
     const { grpc, client } = await this.ensureClient();
     signal.throwIfAborted();
-    const headers = await openShellGatewayGrpcMetadata(grpc, this.options.auth);
+    const headers = await openShellGatewayGrpcMetadata(grpc, this.options.auth, this.oidc);
     signal.throwIfAborted();
     return new Promise<RecordValue>((resolve, reject) => {
       let call: ClientUnaryCall | undefined;
