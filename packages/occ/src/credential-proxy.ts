@@ -351,7 +351,7 @@ export class CredentialProxy implements CredentialProxyExchange {
       return refuse("identity");
     }
     // The sender and Sandbox are authenticated from here, so a share keyed on them cannot
-    // be spent by another Sandbox's traffic.
+    // be spent by another Sandbox's traffic. A full share refuses before the replay check.
     const share = JSON.stringify([peer.sender, sandboxId]);
     if (!this.chargeShare(charge, share)) {
       return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };

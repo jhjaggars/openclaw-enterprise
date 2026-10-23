@@ -1687,15 +1687,16 @@ test("one Sandbox's open handles leave operation capacity to other Sandboxes", a
 test("requests still authenticating share a small budget charged before verification", async (t) => {
   const f = await syntheticDispatchFixture(t);
   let gate;
-  let entered = 0;
+  let verified = 0;
   let filled;
   const s = f.sandboxes((ports) => ({
     ...ports,
     exchangeOwner: {
       ...ports.exchangeOwner,
       async verify(name) {
+        verified += 1;
         if (gate && name === "a") {
-          if (++entered === OPERATION_AUTHENTICATION_BUDGET) {
+          if (verified === OPERATION_AUTHENTICATION_BUDGET) {
             filled.resolve();
           }
           await gate.promise;
@@ -1709,7 +1710,7 @@ test("requests still authenticating share a small budget charged before verifica
   const pending = Array.from({ length: OPERATION_AUTHENTICATION_BUDGET }, () => s.resolve("a"));
   await filled.promise;
   assert.deepEqual(await s.resolve("b"), saturated, "the budget is global before verification");
-  assert.equal(entered, OPERATION_AUTHENTICATION_BUDGET, "the excess request is never verified");
+  assert.equal(verified, OPERATION_AUTHENTICATION_BUDGET, "the excess request is never verified");
   gate.resolve();
   assert.ok((await Promise.all(pending)).every((decision) => decision.kind === "ready"));
   gate = undefined;
@@ -1720,17 +1721,28 @@ test("requests still authenticating share a small budget charged before verifica
 test("every refusal returns its operation slot", async (t) => {
   const f = await syntheticDispatchFixture(t);
   let mode;
+  let gate;
+  let gated = 0;
+  let filled;
   const s = f.sandboxes((ports) => ({
     ...ports,
     exchangeOwner: {
       ...ports.exchangeOwner,
       async verify(name) {
+        if (mode === "gated" && name === "a") {
+          if (++gated === OPERATION_AUTHENTICATION_BUDGET) {
+            filled.resolve();
+          }
+          await gate.promise;
+        }
         if (mode === "verification throws") {
           throw new Error("synthetic verification failure");
         }
         return mode === "unknown peer" ? undefined : ports.exchangeOwner.verify(name);
       },
     },
+    installation: async (peer) =>
+      mode === "installation missing" ? undefined : ports.installation(peer),
     async check(use) {
       if (mode === "policy throws") {
         throw new Error("synthetic policy failure");
@@ -1773,6 +1785,11 @@ test("every refusal returns its operation slot", async (t) => {
       () => s.resolve("a", { deadlineAt: new Date(f.ports.now()).toISOString() }),
       { kind: "refused", error: { kind: "deadline_exceeded" } },
     ],
+    [
+      "installation missing",
+      () => s.resolve("a"),
+      { kind: "refused", error: { kind: "not_ready", code: "attachment_pending" } },
+    ],
     ["unsupported route", () => s.resolve("a", unsupported), denied("unsupported_operation")],
     ["policy denies", () => s.resolve("a"), denied("withdrawn")],
     ["policy throws", () => s.resolve("a"), unavailable("authority")],
@@ -1790,6 +1807,22 @@ test("every refusal returns its operation slot", async (t) => {
     assert.equal((await s.resolve("a", undefined, closed.signal)).kind, "ready", name);
     closed.abort();
   }
+  // No slot was returned twice either: the share and the budget still hold exactly.
+  const held = new AbortController();
+  for (let i = 0; i < OPERATION_SANDBOX_SHARE; i += 1) {
+    assert.equal((await s.resolve("a", undefined, held.signal)).kind, "ready");
+  }
+  assert.deepEqual(await s.resolve("a"), saturated, "the share still holds");
+  held.abort();
+  mode = "gated";
+  gate = Promise.withResolvers();
+  filled = Promise.withResolvers();
+  const pending = Array.from({ length: OPERATION_AUTHENTICATION_BUDGET }, () => s.resolve("a"));
+  await filled.promise;
+  assert.deepEqual(await s.resolve("b"), saturated, "the budget still holds");
+  mode = undefined;
+  gate.resolve();
+  assert.ok((await Promise.all(pending)).every((decision) => decision.kind === "ready"));
 });
 
 test("requests refused before capture leave the replay table to every Sandbox", async (t) => {
