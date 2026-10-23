@@ -233,12 +233,13 @@ retain their default workspace; dedicated Harness claims retain node identity. C
 precede Pods for `WaitForFirstConsumer`; [Gateway storage](../reference/drivers/kubernetes-compute/storage-and-credentials.md#gateway-storage)
 defines initialization and mounts.
 
-Workspace-file access uses the enrolled Harness node; Gateway and Harness share
-no workspace, session, skill or image mounts. The [storage contract](../reference/drivers/kubernetes-compute/storage-and-credentials.md#harness-storage)
+Gateway and Harness share no workspace, session, skill or image mounts. Codex gets
+its Harness path before startup; node pairing enables file-transfer.
+The [storage contract](../reference/drivers/kubernetes-compute/storage-and-credentials.md#harness-storage)
 covers per-image assets and generated-image return. The node host stores bundles
 in its state and workspaces below `/home/node/workspace`, separate from gateway state,
-`CODEX_HOME` and credentials. Restart republishes image-owned assets and reconnects
-with the paired identity; readiness checks node identity. Compile cache and model-probe
+`CODEX_HOME` and credentials. Restart republishes image-owned assets and reconnects;
+readiness checks the paired identity. Compile cache and model-probe
 state remain in node state and `TMPDIR`, which a Sandbox Driver can grant.
 
 On stop or retirement, the selected Sandbox Driver cleans up after Compute stops an
