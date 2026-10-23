@@ -1,7 +1,7 @@
 ---
 created: "2026-10-23"
 updated: "2026-10-23"
-last_updated_session: "named-workspace-readiness-rate-limit-20261023"
+last_updated_session: "named-workspace-gateway-identity-20261023"
 ---
 
 # Named workspace runtime flow
@@ -36,7 +36,7 @@ graph TD
     C --> E{"Worker startup cycle selected?"}
     E -->|independent| J["Normal recovery and claims"]
     E -->|gateway-readiness| F["Hold recovery and claims"]
-    F --> G["Read logical identity, physical UID and authenticated gateway Health"]
+    F --> G["Check logical identity and physical UID;<br/>read Health, then GetCurrentUser"]
     G --> H{"Identity ready and original work age known?"}
     H -->|no| F
     H -->|yes| J
@@ -80,10 +80,19 @@ readiness probes; callers behind one proxy share a budget.
 
 `apps/controller/src/worker/startup-gate.ts:waitForStartupDependency` runs before
 recovery or claims only when composition selects `gateway-readiness`.
-`apps/controller/src/drivers/sandbox/openshell.ts:checkStartupDependency` invokes
-only authenticated Health on the configured TLS gateway. It distinguishes
-unavailable identity, forbidden access and pending readiness. The worker repeats
-logical and physical identity checks before and after Health succeeds.
+`apps/controller/src/drivers/sandbox/openshell.ts:checkStartupDependency` first
+reads public Health on the configured TLS gateway, then calls
+`apps/controller/src/drivers/sandbox/openshell-gateway-client.ts:checkIdentity`.
+This method reads `GetCurrentUser` with the same configured credentials, rereading
+the bearer token file for that call. It accepts only a nonempty subject and an authenticated
+provider matching the transport, as defined in the
+[named workspace settings](../reference/settings/named-workspace.md).
+It returns no identity or roles and creates no Workspace or provider resources.
+
+The gate distinguishes unavailable identity, forbidden access and pending
+readiness. Missing identity-read capability and permissive `local_dev` responses
+keep it closed. RPCs retain deadlines and abort cancellation. The worker repeats
+logical and physical identity checks before and after both gateway reads succeed.
 
 `packages/occ/src/state/postgres-work-queue.ts:startupWorkAge` reads original
 queued and claimed timestamps on the database clock. Unknown age keeps the gate
@@ -97,10 +106,13 @@ profiles bypass it; this Git-disabled contract serves no broker while gated.
 Run `node --test tests/integration/named-workspace-runtime.test.ts` with disposable
 application and migration database URLs. The test exercises production API
 composition, real PostgreSQL persistence, the Kubernetes SDK against a local TLS
-fixture and authenticated gRPC Health.
+fixture, public gRPC Health and authenticated `GetCurrentUser`.
 The runtime test covers changed UID, unavailable identity, forbidden reads, bearer-file refresh,
+refused permissive identities, missing RPC support, malformed identities, cancellation,
 provisioning API readiness, deleting logical and terminating physical refusals,
 initial work, recovery, restart, old/unknown age and an independent startup cycle.
+A healthy gateway with a revoked bearer leaves both expired claimed work and fresh
+queued work unchanged. Rotation of the same bearer file permits normal recovery.
 
 Run `node --test tests/integration/named-workspace-chart.test.ts` for real Helm
 install and upgrade rendering. Helm checks retain the gateway resources, narrow tenant selectors, and retain
@@ -121,5 +133,6 @@ GitHub sign-in, browser behavior, supplier compatibility or model execution.
 
 ## Changelog
 
+- 2026-10-23 15:12: Require an authenticated identity read after public Health. (named-workspace-gateway-identity-20261023 - 5c7ffab23c3a7ebbc96e81b37722ad8e634ee1da)
 - 2026-10-23 01:13: Bound readiness requests before dependency checks. (named-workspace-readiness-rate-limit-20261023 - 70a74c6bb1eaba6acb7536101889cbf79b26c7ef)
 - 2026-10-23 00:48: Document runtime attachment and optional worker dependency checks. (named-workspace-runtime-publication-20261023 - 9c10e6d571333c89e9206df6505fd0fbebd14247)

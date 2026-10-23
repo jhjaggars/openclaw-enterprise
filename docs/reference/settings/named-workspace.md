@@ -51,8 +51,13 @@ then adds worker tenant and configuration RoleBindings.
 
 `startupCycle: gateway-readiness` explicitly selects the worker startup gate. It
 requires a direct HTTPS OpenShell endpoint with bearer-file or mTLS authentication.
-The worker checks logical and physical identity and authenticated read-only Health
-before recovery or claims. Missing identity, forbidden access, pending readiness
+The worker checks logical and physical identity, public Health, then authenticated
+`GetCurrentUser` before recovery or claims. The identity read must return a nonempty
+subject and `oidc` or `cloudflare_access` for bearer authentication, or `mtls` for
+certificate authentication, including operator certificates. Missing or unsupported
+identity reads, malformed identities and `local_dev` responses fail closed. This
+check does not establish Workspace permissions or authorization for later work.
+Missing identity, forbidden access, pending readiness
 and unknown original work age keep it closed. A positively old age is reported,
 then normal original deadline and lease rules apply. Every process restart closes
 the gate; it never renews leases, resets attempts or changes original timestamps.

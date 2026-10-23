@@ -2778,7 +2778,13 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   ): Promise<"ready" | "pending" | "identity-unavailable" | "forbidden"> {
     signal.throwIfAborted();
     try {
-      await this.gatewayClientForNamespace(namespace).health(signal);
+      const client = this.gatewayClientForNamespace(namespace);
+      await client.health(signal);
+      signal.throwIfAborted();
+      if (client.checkIdentity === undefined) {
+        return "identity-unavailable";
+      }
+      await client.checkIdentity(signal);
       signal.throwIfAborted();
       return "ready";
     } catch (error) {

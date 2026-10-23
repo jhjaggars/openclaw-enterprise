@@ -396,5 +396,6 @@ namedWorkspace:
   installationId: ""
   namespaceId: ""
   uid: ""
-  # independent does not gate work; gateway-readiness opts into read-only startup gating.
+  # independent does not gate work; gateway-readiness requires public Health and
+  # authenticated GetCurrentUser before recovery or claims.
   startupCycle: independent

@@ -368,7 +368,8 @@ test(
     );
     assert.equal((await api.inject({ method: "GET", url: "/readyz" })).statusCode, 200);
 
-    // A real TLS gRPC peer checks authentication and implements only read-only Health.
+    // Stock Health is public. Only GetCurrentUser checks the configured bearer;
+    // permissive stock deployments can instead return a local_dev principal.
     const grpc = require("@grpc/grpc-js");
     const loader = require("@grpc/proto-loader");
     const proto = await loader.load(
@@ -379,20 +380,46 @@ test(
     const gateway = new grpc.Server();
     let healthCode = 14;
     let healthCalls = 0;
+    let identityCode = 0;
+    let identityCalls = 0;
+    let identityRefusals = 0;
+    let identity: { subject?: string; identity_provider?: string } = {
+      subject: "synthetic-caller",
+      identity_provider: "oidc",
+    };
+    let holdIdentity = false;
+    let identityCancelled = false;
     let expectedGatewayToken = "synthetic-gateway-identity";
     gateway.addService(service.service, {
-      Health(
-        call: { metadata: { get(key: string): string[] } },
-        callback: (error: unknown, value?: unknown) => void,
-      ) {
+      Health(_call: unknown, callback: (error: unknown, value?: unknown) => void) {
         healthCalls++;
-        if (call.metadata.get("authorization")[0] !== `Bearer ${expectedGatewayToken}`) {
-          callback({ code: 16, details: "Synthetic identity unavailable" });
-          return;
-        }
         callback(healthCode ? { code: healthCode, details: "synthetic readiness" } : null, {
           status: "SERVICE_STATUS_HEALTHY",
         });
+      },
+      GetCurrentUser(
+        call: { metadata: { get(key: string): string[] }; on(event: string, fn: () => void): void },
+        callback: (error: unknown, value?: unknown) => void,
+      ) {
+        identityCalls++;
+        if (holdIdentity) {
+          call.on("cancelled", () => {
+            identityCancelled = true;
+          });
+          return;
+        }
+        if (
+          identity.identity_provider !== "local_dev" &&
+          call.metadata.get("authorization")[0] !== `Bearer ${expectedGatewayToken}`
+        ) {
+          identityRefusals++;
+          callback({ code: 16, details: "Synthetic identity unavailable" });
+          return;
+        }
+        callback(
+          identityCode ? { code: identityCode, details: "synthetic identity read" } : null,
+          identity,
+        );
       },
     });
     const port = await new Promise<number>((resolve, reject) =>
@@ -416,22 +443,64 @@ test(
       .insecureTransport;
     const gated = await load({ ...selected, startupCycle: "gateway-readiness" });
     assert.ok(gated.startupDependency);
-    for (const [code, expected] of [
-      [14, "pending"],
-      [16, "identity-unavailable"],
-      [7, "forbidden"],
-      [0, "ready"],
-    ] as const) {
-      healthCode = code;
-      assert.equal(await gated.startupDependency.check(AbortSignal.timeout(2000)), expected);
-    }
+    assert.equal(await gated.startupDependency.check(AbortSignal.timeout(2000)), "pending");
+    assert.equal(identityCalls, 0, "an unavailable gateway cannot pass startup");
+    healthCode = 0;
     expectedGatewayToken = "synthetic-rotated-gateway-identity";
     assert.equal(
       await gated.startupDependency.check(AbortSignal.timeout(2000)),
       "identity-unavailable",
     );
+    // A caller can select a permissive gateway that ignores the revoked bearer.
+    // Its successful local_dev response must still leave the startup gate closed.
+    identity = { subject: "unauthenticated-local-dev", identity_provider: "local_dev" };
+    assert.equal(
+      await gated.startupDependency.check(AbortSignal.timeout(2000)),
+      "identity-unavailable",
+    );
     await writeFile(tokenPath, expectedGatewayToken, { mode: 0o600 });
+    for (const invalid of [
+      {},
+      { subject: " ", identity_provider: "oidc" },
+      { subject: "synthetic-caller" },
+      { subject: "synthetic-caller", identity_provider: "unknown" },
+      { subject: "synthetic-caller", identity_provider: "mtls" },
+    ]) {
+      identity = invalid;
+      assert.equal(
+        await gated.startupDependency.check(AbortSignal.timeout(2000)),
+        "identity-unavailable",
+      );
+    }
+    identity = { subject: "synthetic-caller", identity_provider: "cloudflare_access" };
     assert.equal(await gated.startupDependency.check(AbortSignal.timeout(2000)), "ready");
+    identity.identity_provider = "oidc";
+    assert.equal(await gated.startupDependency.check(AbortSignal.timeout(2000)), "ready");
+    for (const [code, expected] of [
+      [14, "pending"],
+      [4, "pending"],
+      [16, "identity-unavailable"],
+      [7, "forbidden"],
+      [12, "identity-unavailable"],
+      [0, "ready"],
+    ] as const) {
+      identityCode = code;
+      assert.equal(await gated.startupDependency.check(AbortSignal.timeout(2000)), expected);
+    }
+    // Abort the real in-flight identity RPC, rather than converting cancellation to readiness.
+    holdIdentity = true;
+    const abort = new AbortController();
+    const callsBeforeAbort = identityCalls;
+    const checking = gated.startupDependency.check(abort.signal);
+    const cancelled = assert.rejects(checking, /synthetic cancellation/);
+    await waitFor(
+      "identity RPC in flight",
+      async () => identityCalls > callsBeforeAbort || undefined,
+    );
+    abort.abort(new Error("synthetic cancellation"));
+    await cancelled;
+    await waitFor("identity RPC cancelled", async () => identityCancelled || undefined);
+    holdIdentity = false;
     for (const scheme of ["HTTPS", "hTtPs"]) {
       Object.assign(configuration.backend[0]!.configuration, {
         endpoint: `${scheme}://localhost:${port}`,
@@ -439,8 +508,10 @@ test(
       const { startupDependency } = await load({ ...selected, startupCycle: "gateway-readiness" });
       assert.ok(startupDependency);
       const before = healthCalls;
+      const beforeIdentity: number = identityCalls;
       assert.equal(await startupDependency.check(AbortSignal.timeout(2000)), "ready");
       assert.equal(healthCalls, before + 1);
+      assert.equal(identityCalls, beforeIdentity + 1);
     }
     // A bare address is valid for the Backend, but cannot satisfy this TLS startup gate.
     Object.assign(configuration.backend[0]!.configuration, {
@@ -471,15 +542,16 @@ test(
       namespaceTarget: "ready",
       actorId: fixture.actor.id,
     });
-    const snapshot = async () =>
+    const snapshot = async (key = workKey) =>
       (
         await fixture.observerPool.query(
           "SELECT state, attempt_count, claim_token, lease_expires_at, created_at, row_to_json(w)::text AS row_bytes FROM occ.controller_work w WHERE idempotency_key = $1",
-          [workKey],
+          [key],
         )
       ).rows[0];
     await delay(150);
     const before = await snapshot();
+    const beforeInitial = await snapshot(initialKey);
     const events: Record<string, unknown>[] = [];
     healthCode = 14;
     const startWorker = async (drivers = gated, timeout = 900_000, maxAttempts = 2) => {
@@ -500,7 +572,7 @@ test(
     };
     worker = await startWorker();
     await waitFor(
-      "pending authenticated health",
+      "pending gateway health",
       async () => events.some((e) => e.status === "pending") || undefined,
     );
     assert.deepEqual(await snapshot(), before, "expired claim is not recovered while gated");
@@ -521,7 +593,24 @@ test(
       async () => events.some((e) => e.status === "identity-unavailable") || undefined,
     );
     assert.deepEqual(await snapshot(), before);
+    // Health now succeeds, but the nonempty owning token file holds a revoked bearer.
+    // Neither expired claimed work nor fresh queued work may change before rotation.
+    expectedGatewayToken = "synthetic-worker-rotated-identity";
+    const refusalsBefore = identityRefusals;
     physicalUid = selected.uid;
+    // Both failures report identity-unavailable only on transition. Observe the worker
+    // polling again after an actual refused identity read, then check the durable work.
+    await waitFor(
+      "healthy gateway refuses revoked bearer and worker remains gated",
+      async () => identityRefusals >= refusalsBefore + 2 || undefined,
+    );
+    assert.deepEqual(await snapshot(), before, "revoked bearer cannot release an expired claim");
+    assert.deepEqual(
+      await snapshot(initialKey),
+      beforeInitial,
+      "revoked bearer cannot claim fresh work",
+    );
+    await writeFile(tokenPath, expectedGatewayToken, { mode: 0o600 });
     await waitFor(
       "readiness releases original recovery",
       async () =>
@@ -584,6 +673,7 @@ test(
           [key],
         );
         const beforeIndependent = healthCalls;
+        const identityBeforeIndependent: number = identityCalls;
         healthCode = 14;
         events.length = 0;
         worker = await startWorker(runtime);
@@ -593,6 +683,7 @@ test(
         );
         await worker.stop();
         assert.equal(healthCalls, beforeIndependent);
+        assert.equal(identityCalls, identityBeforeIndependent);
         assert.equal(
           events.some((event) => event.event === "worker.startup-gate"),
           false,
