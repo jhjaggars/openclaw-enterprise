@@ -664,6 +664,7 @@ function dockerGatewayRevision(driver, configuration = {}) {
     configurationId: "cfg_00000000-0000-4000-8000-000000000001",
     configurationKind: "agent",
     configurationGeneration: 1,
+    executionAdmission: { version: 2, mode: "unprotected" },
     configuration: admitLoggingConfiguration(configuration, "info"),
     gatewayManagedMode: true,
     harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
@@ -725,6 +726,7 @@ test("Docker Compute recovery keeps dedicated transport paired across container 
     configurationId: "cfg_00000000-0000-4000-8000-000000000001",
     configurationKind: "agent",
     configurationGeneration: 1,
+    executionAdmission: { version: 2, mode: "unprotected" },
     configuration: admitLoggingConfiguration({}, "info"),
     harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
     compute: { id: driver.id, implementation: driver.implementation },
@@ -800,6 +802,7 @@ for (const mode of ["embedded", "dedicated"]) {
       configurationId: "cfg-workspace",
       configurationKind: "agent",
       configurationGeneration: 1,
+      executionAdmission: { version: 2, mode: "unprotected" },
       configuration: admitLoggingConfiguration(
         mode === "dedicated"
           ? { agents: { entries: { main: { workspace: "/home/node/workspace" } } } }

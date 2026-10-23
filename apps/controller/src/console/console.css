@@ -2349,6 +2349,9 @@ select:not([multiple])[size="1"] {
   font-weight: var(--weight-medium);
   color: var(--muted);
 }
+.agent-table tbody tr {
+  cursor: pointer;
+}
 .agent-table tbody tr:hover {
   background: var(--hover);
 }
@@ -2487,7 +2490,7 @@ select:not([multiple])[size="1"] {
   color: var(--accent);
   font-weight: var(--weight-semibold);
 }
-/* An edge with more tabs past it fades (detail.mjs sets the attributes as the strip scrolls).
+/* An edge with more tabs past it fades (detail.mts sets the attributes as the strip scrolls).
    A mask reads only alpha, so the opaque stop may be any opaque colour. */
 .agent-tabs[data-more-before] {
   --agent-tabs-fade-before: var(--space-8);

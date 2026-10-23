@@ -169,6 +169,7 @@ async function setup(context) {
       backendId: null,
       harness: { ...PRODUCTION_HARNESS_DESCRIPTOR, mode: "dedicated" },
       compute: { id: compute.id, implementation: compute.implementation },
+      executionAdmission: { version: 2, mode: "unprotected" },
       harnessAuth: { ...owner.harnessAuth, secretDriverId: secretDriver.id },
       servicePrincipalId: owner.servicePrincipalId,
       createdAt: new Date().toISOString(),

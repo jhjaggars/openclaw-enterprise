@@ -337,6 +337,7 @@ test(
       },
       harness: revision.harness,
       compute: revision.compute,
+      execution_admission: { version: 2, mode: "unprotected" },
     });
     assert.equal(persistedRevision.rows[0].active_revision_id, revision.id);
     assert.equal(activeAgent.activeRevisionId, revision.id);
@@ -813,6 +814,7 @@ test(
       },
       harness: firstRevision.harness,
       compute: firstRevision.compute,
+      execution_admission: { version: 2, mode: "unprotected" },
     });
     assert.deepEqual(persistedRevisions.rows[1].admitted_spec, {
       configuration_id: secondRevision.configurationId,
@@ -826,6 +828,7 @@ test(
       },
       harness: secondRevision.harness,
       compute: secondRevision.compute,
+      execution_admission: { version: 2, mode: "unprotected" },
     });
     assert.equal(
       persistedRevisions.rows[0].service_principal_id,

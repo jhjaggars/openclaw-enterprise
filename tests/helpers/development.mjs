@@ -9,7 +9,7 @@ export function createReadyComputeDriver(id, overrides = {}) {
     capability: "compute",
     implementation: "deterministic-test",
     // Simulates managed-mode enforcement for controller admission tests.
-    supportsGatewayManagedMode: true,
+    supportsGatewayManagedMode: /** @type {true} */ (true),
     async ensureNamespace(namespace) {
       return { namespaceId: namespace.id, namespaceReady: true };
     },

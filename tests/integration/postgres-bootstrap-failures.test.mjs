@@ -14,8 +14,10 @@ import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs
 import { createInstallationDriverConfiguration } from "../helpers/installation-driver-configuration.mjs";
 import { createControllerWorker } from "../../apps/controller/src/worker.ts";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
+import { injectJson } from "../helpers/inject-json.mjs";
 import { jsonLines } from "../helpers/json-lines.mjs";
 import { withPool } from "../helpers/postgres-database.mjs";
+import { temporaryDirectory } from "../helpers/temporary-directory.mjs";
 import { admittedLoggingLevel } from "../../packages/contracts/src/index.ts";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
@@ -258,6 +260,11 @@ async function bootstrapWithLostCommitAcknowledgement(environment) {
   const serviceKeyOutput = JSON.parse(
     await readFile(environment.OCC_BOOTSTRAP_SERVICE_KEY_FILE, "utf8"),
   );
+  // The logged attempt keeps the IDs the run assigned, each in its OCC format (finding 2246).
+  assert.match(failure.attempt.installationId, /^ins_[0-9a-f-]{36}$/);
+  assert.match(failure.attempt.principalId, /^prn_[0-9a-f-]{36}$/);
+  assert.match(failure.attempt.servicePrincipalId, /^spn_[0-9a-f-]{36}$/);
+  assert.equal(failure.attempt.servicePrincipalId, serviceKeyOutput.data.servicePrincipalId);
   assert.deepEqual(await rowCounts(), {
     installations: 1,
     bootstrap_audits: 1,
@@ -273,12 +280,7 @@ async function bootstrapWithLostCommitAcknowledgement(environment) {
 }
 
 async function request(app, method, url, apiKey, body) {
-  const response = await app.inject({
-    method,
-    url,
-    headers: { "x-api-key": apiKey, host: "127.0.0.1" },
-    ...(body === undefined ? {} : { payload: body }),
-  });
+  const response = await injectJson(app, method, url, { key: apiKey, body });
   const parsed = response.body.length === 0 ? undefined : response.json();
   return { status: response.statusCode, body: parsed };
 }
@@ -802,8 +804,7 @@ test(
   requiresFailurePostgres,
   async (context) => {
     const { environment } = await bootstrapExistingInstallation(context, "stored-name");
-    const configurationRoot = await privateOutputDirectory("openclaw-bootstrap-stored-name-");
-    context.after(() => rm(configurationRoot, { recursive: true, force: true }));
+    const configurationRoot = await temporaryDirectory(context, "openclaw-bootstrap-stored-name-");
     // An Installation stored before OCC applied the Name rule can hold a trailing NBSP:
     // PostgreSQL's name check accepts it.
     await withPool(migratorDatabaseUrl(), (pool) =>
@@ -958,10 +959,16 @@ test(
       "fresh-path",
       runBootstrapScript,
     );
-    assert.ok(
-      jsonLines(fresh.stdout).some((line) => line.event === "installation.bootstrapped"),
-      fresh.stdout,
+    const result = jsonLines(fresh.stdout).find(
+      (line) => line.event === "installation.bootstrapped",
     );
+    assert.ok(result, fresh.stdout);
+    // The log line names the new Installation too (finding 2245).
+    const logged = jsonLines(fresh.stderr).find(
+      (line) => line.event === "installation.bootstrapped",
+    );
+    assert.match(result.installationId, /^ins_[0-9a-f-]{36}$/);
+    assert.equal(logged?.installationId, result.installationId, fresh.stderr);
     assert.equal(alreadyBootstrappedEvent(fresh), undefined);
   },
 );
@@ -970,7 +977,7 @@ test(
   "production bootstrap of a complete Installation verifies it without the auth stack",
   requiresFailurePostgres,
   async (context) => {
-    const { environment } = await bootstrapExistingInstallation(context, "fast-path");
+    const { environment, fresh } = await bootstrapExistingInstallation(context, "fast-path");
     const counts = await rowCounts();
     const outputs = await Promise.all(
       [environment.OCC_BOOTSTRAP_PASSWORD_FILE, environment.OCC_BOOTSTRAP_SERVICE_KEY_FILE].map(
@@ -985,6 +992,12 @@ test(
       repeated.stdout,
     );
     assert.equal(alreadyBootstrappedEvent(repeated)?.step, "fast-path", repeated.stderr);
+    assert.equal(
+      alreadyBootstrappedEvent(repeated)?.installationId,
+      jsonLines(fresh.stdout).find((line) => line.event === "installation.bootstrapped")
+        ?.installationId,
+      repeated.stderr,
+    );
     assert.deepEqual(await rowCounts(), counts);
     assert.deepEqual(
       await Promise.all(
