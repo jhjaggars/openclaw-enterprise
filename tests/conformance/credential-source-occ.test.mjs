@@ -1981,7 +1981,10 @@ test("a later update that stops before its gateway write never releases a Secret
     iamState.restrictions.push(deny);
   });
   await assert.rejects(
-    controller.updateCredentialSource(administrator, { ...input, secrets: { api_key: staged.ref } }),
+    controller.updateCredentialSource(administrator, {
+      ...input,
+      secrets: { api_key: staged.ref },
+    }),
     AuthorizationDeniedError,
   );
   assert.equal(writes(), 1, "the denied update never reached the gateway");

@@ -2551,9 +2551,7 @@ async function verifyCredentialSourceContract(
     assert.deepEqual(await begin(transaction, laterAttempt, { api_key: recordedRef }), {
       ...retainingSource,
       retainedSecrets: {
-        api_key: [replacementRef, recordedRef].sort((left, right) =>
-          left.id < right.id ? -1 : 1,
-        ),
+        api_key: [replacementRef, recordedRef].sort((left, right) => (left.id < right.id ? -1 : 1)),
       },
       updateAttemptId: laterAttempt,
     });

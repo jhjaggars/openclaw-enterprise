@@ -12,7 +12,10 @@ import {
 import { commitAckProxy } from "../fixtures/postgres-commit-ack-proxy.mjs";
 import { createDevelopmentComputeDriver } from "../helpers/development.mjs";
 import { createPostgresAgentApp } from "../helpers/postgres-agent-app.mjs";
-import { databaseUrl as configuredDatabaseUrl, requiresPostgres } from "../helpers/postgres-database.mjs";
+import {
+  databaseUrl as configuredDatabaseUrl,
+  requiresPostgres,
+} from "../helpers/postgres-database.mjs";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
 import { waitFor } from "../helpers/wait-for.mjs";
 
