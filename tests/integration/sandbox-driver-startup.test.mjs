@@ -3812,28 +3812,46 @@ test("OpenShell operator mode owns workspace chart resources around the Workspac
   ]);
 });
 
-test("OpenShell managed mode fails before mutating Kubernetes or the Gateway", async () => {
+test("OpenShell managed mode reconciles its Workspace without touching Kubernetes", async () => {
   const events = [];
   const configuration = sandboxInstallation().drivers.sandbox.configuration;
   configuration.gateway.workspaceMode = "managed";
-  configuration.gateway.operatorWorkspaceResources = [
-    { apiVersion: "v1", kind: "ServiceAccount", metadata: { name: "must-not-be-applied" } },
-  ];
-  const gatewayClient = workspaceGatewayClient();
+  const gatewayClient = workspaceGatewayClient([], events);
   const driver = openShellDriver(gatewayClient, configuration);
   const context = namespaceContext();
   context.kubernetes = kubernetesObjectClient(events);
 
-  await assert.rejects(
-    driver.ensureNamespace(context),
-    /managed workspace mode is not implemented; cannot ensure a Namespace/,
-  );
-  assert.deepEqual(events, []);
-  assert.deepEqual(gatewayClient.calls, []);
+  // Managed mode creates the Workspace over RPC only: the gateway owns the namespace
+  // behind it, so no Kubernetes mutation may occur on the OCC side.
+  await driver.ensureNamespace(context);
+  await driver.ensureNamespace(context);
+  assert.deepEqual(events, [
+    ["gateway", "health"],
+    ["gateway", "getWorkspace", context.namespace.name],
+    ["gateway", "createWorkspace", context.namespace.name],
+    ["gateway", "health"],
+    ["gateway", "getWorkspace", context.namespace.name],
+  ]);
+  assert.deepEqual(gatewayClient.workspaces.get(context.namespace.name), {
+    name: context.namespace.name,
+    labels: {
+      "app.kubernetes.io/managed-by": "openclaw-enterprise",
+      "openclaw.dev/namespace-id": context.namespace.id,
+    },
+    phase: "WORKSPACE_PHASE_ACTIVE",
+  });
+
+  // Namespace retirement still deletes the owned Workspace over RPC, with no
+  // OCC-applied resources to remove.
+  events.length = 0;
+  await driver.cleanup(context);
+  assert.deepEqual(events, [
+    ["gateway", "getWorkspace", context.namespace.name],
+    ["gateway", "deleteWorkspace", context.namespace.name],
+  ]);
+  assert.equal(gatewayClient.workspaces.has(context.namespace.name), false);
 });
 
-// The wait slept a whole poll interval past its deadline: timeoutMs 30000 with pollIntervalMs
-// 600000 checked again only after ten minutes (finding 2324).
 test("OpenShell gateway readiness checks once more at its deadline, not a poll interval later", async () => {
   const configuration = sandboxInstallation().drivers.sandbox.configuration;
   configuration.gateway.readiness = {

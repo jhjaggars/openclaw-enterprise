@@ -2314,6 +2314,23 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
       "OpenShell gateway workspaceMode must be managed or operator.",
     );
   }
+  if (options.gateway.workspaceMode === "managed") {
+    // The gateway owns every sandbox-side Kubernetes object in managed mode, so OCC
+    // cannot apply or observe namespace resources; accepting them would misstate the
+    // boundary.
+    for (const key of [
+      "operatorNamespaceLabels",
+      "readiness",
+      "operatorWorkspaceResources",
+      "networkPolicyResources",
+    ] as const) {
+      if (options.gateway[key] !== undefined) {
+        throw new OpenShellSandboxConfigurationFailure(
+          `OpenShell gateway option ${key} applies to operator workspace mode; in managed mode the gateway owns the workspace resources.`,
+        );
+      }
+    }
+  }
   for (const key of Object.keys(options.gateway)) {
     if (
       ![
@@ -3083,8 +3100,37 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   private async ensureNamespaceWorkspace(context: SandboxNamespaceContext): Promise<void> {
-    this.requireOperatorWorkspaceMode("ensure a Namespace");
     const namespace = namespaceName(context.namespace);
+    if (this.options.gateway.workspaceMode === "managed") {
+      // Managed mode reconciles the Workspace over RPC only: the gateway creates and
+      // owns the namespace behind it, so OCC performs no Kubernetes mutation here.
+      const client = this.gatewayClientForNamespace(namespace);
+      await client.health(context.signal);
+      const name = workspaceName(context.namespace);
+      let workspace = await client.getWorkspace(name, context.signal);
+      if (workspace === undefined) {
+        try {
+          workspace = await client.createWorkspace(
+            name,
+            workspaceLabels(context.namespace),
+            context.signal,
+          );
+        } catch (error) {
+          if (!(error instanceof OpenShellWorkspaceAlreadyExistsError)) {
+            throw error;
+          }
+          workspace = await client.getWorkspace(name, context.signal);
+          if (workspace === undefined) {
+            throw new OpenShellSandboxConfigurationFailure(
+              `OpenShell Workspace ${name} disappeared during creation.`,
+            );
+          }
+        }
+      }
+      verifyActiveWorkspace(workspace, context.namespace);
+      return;
+    }
+    this.requireOperatorWorkspaceMode("ensure a Namespace");
     if (this.operatorOwnedKubernetesResources) {
       const api = kubernetes(context);
       const observed = await api.read({
@@ -3162,6 +3208,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     if (this.options.gateway.readiness !== undefined) {
       await waitForGatewayReadiness(context, this.options.gateway.readiness);
     }
+    // Managed mode reconciles the Workspace over RPC only: the gateway creates and
+    // owns the namespace behind it, so OCC performs no Kubernetes mutation here.
     const client = this.gatewayClientForNamespace(namespace);
     await client.health(context.signal);
     const name = workspaceName(context.namespace);
@@ -4208,7 +4256,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       }
       return;
     }
-    this.requireOperatorWorkspaceMode("clean up a Namespace");
     const namespace = namespaceName(context.namespace);
     const client = this.gatewayClientForNamespace(namespace);
     const workspace = await client.getWorkspace(workspaceName(context.namespace), context.signal);
@@ -4232,6 +4279,11 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         await this.deleteRuntimeProfileIfUnused(client, workspace.name, profileId, context.signal);
       }
       await client.deleteWorkspace(workspace.name, context.signal);
+    }
+    if (this.options.gateway.workspaceMode === "managed") {
+      // Managed mode has no OCC-applied namespace resources; the gateway deletes the
+      // namespace it created behind the Workspace.
+      return;
     }
     if (this.operatorOwnedKubernetesResources) {
       return;

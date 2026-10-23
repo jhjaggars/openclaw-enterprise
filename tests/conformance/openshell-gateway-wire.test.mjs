@@ -3241,7 +3241,9 @@ test("OpenShell client sends client_secret_basic and audience parameters when se
       "utf8",
     ).toString("base64");
     assert.equal(exchange.authorization, `Basic ${expected}`);
-    assert.equal(exchange.body.get("client_id"), "wire-oidc-basic-client");
+    // Basic is the only authentication method on the wire: no client identity
+    // or secret may also appear in the form body.
+    assert.equal(exchange.body.get("client_id"), null);
     assert.equal(exchange.body.get("client_secret"), null);
     assert.equal(exchange.body.get("audience"), "openshell-cli");
     assert.equal(exchange.body.get("scope"), "openshell:gateway");

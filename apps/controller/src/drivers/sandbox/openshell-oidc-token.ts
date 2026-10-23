@@ -87,9 +87,10 @@ export class OpenShellOidcTokenSource {
     };
     if (this.options.tokenAuth === "client_secret_basic") {
       // RFC 6749 2.3.1: form-urlencode both credentials before the base64 pair.
+      // The identity travels only in the header; a client_id in the body would
+      // compete with it, and Keycloak prioritizes the body parameter.
       const encoded = `${encodeURIComponent(this.options.clientId)}:${encodeURIComponent(secret)}`;
       headers.authorization = `Basic ${Buffer.from(encoded, "utf8").toString("base64")}`;
-      body.set("client_id", this.options.clientId);
     } else {
       body.set("client_id", this.options.clientId);
       body.set("client_secret", secret);
