@@ -784,7 +784,10 @@ function preparationFailureDiagnostic(error: unknown): ComputePrepareRevisionFai
     code: "KUBERNETES_PREPARATION_FAILED",
     stage: failure.stage,
     errorClass: "KubernetesPreparationFailure",
-    message: "Kubernetes revision preparation failed.",
+    message:
+      cause instanceof Error && cause.message
+        ? `Kubernetes revision preparation failed: ${cause.message}`
+        : "Kubernetes revision preparation failed.",
   };
 }
 
