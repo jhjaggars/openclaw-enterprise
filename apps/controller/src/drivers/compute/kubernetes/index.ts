@@ -4678,7 +4678,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
           }
         }
         if (
-          !(await this.providerHarnessReady(revision, namespace, requirements.labels)) ||
+          !(await this.providerHarnessObservation(
+            sandboxDriver,
+            revision,
+            namespace,
+            requirements,
+          )) ||
           !(await this.workspaceNodeReady(revision, namespace))
         ) {
           return incomplete();
@@ -5180,14 +5185,16 @@ export class KubernetesComputeDriver implements ComputeDriver {
         [],
         this.sandboxWorkloadFiles(pluginRuntime),
       );
-      if (!(await this.providerHarnessReady(revision, namespace, requirements.labels))) {
+      const sandboxContext = await this.sandboxNamespaceContext(
+        this.sandboxNamespaceForRevision(revision, namespace),
+        namespace,
+      );
+      if (
+        !(await this.providerHarnessObservation(sandboxDriver, revision, namespace, requirements))
+      ) {
         throw new Error("The exact AgentRevision workload is not ready.");
       }
       if (sandboxDriver.harnessEndpoint !== undefined) {
-        const sandboxContext = await this.sandboxNamespaceContext(
-          this.sandboxNamespaceForRevision(revision, namespace),
-          namespace,
-        );
         providerEndpoint = await sandboxDriver.harnessEndpoint({
           ...sandboxContext,
           revision,
@@ -7145,6 +7152,27 @@ export class KubernetesComputeDriver implements ComputeDriver {
     ) {
       throw new OwnershipFailure("SandboxDriver returned an ambiguous Sandbox identity.");
     }
+  }
+
+  /**
+   * Provider-Harness readiness through the owning SandboxDriver when it reports its
+   * own observation (managed remote Sandboxes), otherwise through local Pod
+   * observation in the Compute-owned namespace.
+   */
+  private async providerHarnessObservation(
+    sandboxDriver: SandboxDriver | undefined,
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+    requirements: HarnessWorkloadRequirements,
+  ): Promise<boolean> {
+    if (sandboxDriver?.harnessReady !== undefined) {
+      const sandboxContext = await this.sandboxNamespaceContext(
+        this.sandboxNamespaceForRevision(revision, namespace),
+        namespace,
+      );
+      return sandboxDriver.harnessReady({ ...sandboxContext, revision, requirements });
+    }
+    return this.providerHarnessReady(revision, namespace, requirements.labels);
   }
 
   private async providerHarnessReady(

@@ -13,7 +13,8 @@ Harnesses to the selected OpenShell Sandbox Driver. One deployment-paired OpenSh
 an explicitly configured workspace mode. Operator mode is implemented: for each
 OCC Namespace, the Driver labels the Kubernetes namespace, reconciles rendered
 workspace-chart resources, and creates or adopts an OpenShell Workspace with
-the same physical name. Managed mode is recognized but fails before mutation.
+the same physical name. Managed mode delegates the namespace and its resources
+to the gateway.
 Sandbox requests are homed in the operator-mode Workspace.
 
 The model credential uses a [credential source](credential-source-lifecycle.md),
@@ -145,8 +146,8 @@ retains recovery state.
 
 Kubernetes Compute reconciles quota, limits, and baseline NetworkPolicies before
 calling `SandboxDriver.ensureNamespace`. The Driver first checks
-`gateway.workspaceMode`. Managed mode returns an unsupported-mode error before
-using the Kubernetes client or Gateway. Operator mode applies the configured
+`gateway.workspaceMode`. Managed mode reconciles the Workspace over the
+Gateway RPC without the Kubernetes client. Operator mode applies the configured
 namespace label, workspace-chart resources, and provider NetworkPolicies, in
 that order, then calls the Gateway health RPC. If configured, namespace-local
 readiness observations happen before that health check; the development

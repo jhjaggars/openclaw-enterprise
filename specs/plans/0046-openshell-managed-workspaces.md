@@ -113,6 +113,30 @@ recorded here if any require a design choice.
     rejection of each operator-only option through Installation loading.
     `sandbox-driver-startup` and `openshell-gateway-wire` pass (56 tests),
     plus `pnpm typecheck`, `pnpm lint`, and `pnpm format:check`.
+  - Steps 3-4 landed: `provisionHarness` dispatches on workspace mode. The
+    managed spec (`managedSandboxSpec`) sends only the workload — image,
+    command, environment, agent resources, containment policy, providers —
+    with no RuntimeClass, ServiceAccount, workspace volume, or driver-config
+    mount under `/sandbox`, so the gateway's own workspace volume provides
+    persistence; Harness workspace mounts are refused with
+    `SANDBOX_HARNESS_UNSUPPORTED`. The `kubernetes` Pod-infrastructure
+    options (`runtimeClassName`, `serviceAccount`, `sandboxDataMount`,
+    `userNamespaces`) are operator-mode only and rejected in managed mode.
+    Harness endpoint resolution, revision cleanup, and log reads lost their
+    managed-mode guards (pure gateway RPC).
+  - Readiness: the SandboxDriver contract gained optional `harnessReady`;
+    the managed driver reports the gateway Sandbox phase plus the exact
+    Codex service exposure, and Kubernetes Compute's
+    `providerHarnessObservation` prefers it over local Pod observation when
+    present. Operator mode keeps Pod observation (the stronger identity
+    proof), so the OpenShell driver exposes `harnessReady` only in managed
+    mode.
+  - Verification: 292 tests across `sandbox-driver-startup`,
+    `openshell-gateway-wire`, and `kubernetes-compute` pass; `pnpm
+    typecheck`, `pnpm lint`, `pnpm format:check` pass. Reference and flow
+    docs updated for managed mode; operational detail lives in the external
+    gateway guide. Remaining: the 0.1.5 live-gateway sandbox probe and a real
+    model turn.
 
 ## Manual Notes
 
