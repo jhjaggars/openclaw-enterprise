@@ -737,7 +737,7 @@ test("an update reconfigures a refresh source whose gateway status is pending", 
 
 /**
  * Records the Namespace, source and Secret row locks held by OCC's latest transaction from now
- * on. An update records its pending Secrets in an earlier transaction that has committed by the
+ * on. An update retains its replacement Secrets in an earlier transaction that has committed by the
  * time the gateway is called, so each transaction starts with an empty list.
  */
 function recordRowLocks(state) {
@@ -1278,7 +1278,7 @@ test("credential source writes refuse active and stale borrowed transactions bef
   };
   const attemptBoth = async () => {
     await assertRefused(controller.createCredentialSource(administrator, input, createAudit));
-    // An update commits its pending Secrets before the gateway write, so it needs its own
+    // An update commits its retained Secrets before the gateway write, so it needs its own
     // transactions too.
     await assertRefused(
       controller.updateCredentialSource(
@@ -1747,7 +1747,7 @@ test("a Secret an update sent to the gateway stays a consumer until an update co
   assert.ok(gateway.stored.has(source.id));
   const retained = await controller.readCredentialSource(administrator, namespace.id, source.id);
   assert.deepEqual(retained.secrets, { api_key: original.ref });
-  // The pending Secret is internal state: the API shape gains no field.
+  // The retained Secret is internal state: the API shape gains no field.
   assert.equal(JSON.stringify(retained).includes(sent.id), false);
 
   // The gateway may inject the sent Secret's value, so deleting that Secret is refused and
@@ -1761,8 +1761,8 @@ test("a Secret an update sent to the gateway stays a consumer until an update co
     referencedBy(source.id),
   );
 
-  // A later successful update to a third Secret replaces the gateway copy, so it clears the
-  // stale mark: neither earlier Secret is a consumer any more.
+  // A later successful update to a third Secret replaces the gateway copy, so it releases the
+  // retained Secret: neither earlier Secret is a consumer any more.
   const third = await modelSecret();
   const updated = await controller.updateCredentialSource(administrator, {
     ...input,
@@ -1777,7 +1777,7 @@ test("a Secret an update sent to the gateway stays a consumer until an update co
   );
 });
 
-test("a repeated update with the Secret it already sent converges and clears the mark", async () => {
+test("a repeated update with the Secret it already sent converges and releases it", async () => {
   const { controller, gateway, makeReady, modelSecret, namespace } = await fixture();
   await makeReady();
   const original = await modelSecret();
@@ -1801,7 +1801,7 @@ test("a repeated update with the Secret it already sent converges and clears the
   const repeated = await controller.updateCredentialSource(administrator, input);
   assert.deepEqual(repeated.secrets, { api_key: sent.ref });
   assert.equal(gateway.calls.filter(({ operation }) => operation === "updateSource").length, 2);
-  // The original is neither recorded nor pending now.
+  // The original is neither recorded nor retained now.
   await controller.deleteSecret(administrator, namespace.id, original.id);
 });
 
@@ -1842,7 +1842,7 @@ test("a refresh update refuses to resend an issuer-rotated Secret an unfinished 
   );
   assert.equal(context.gateway.calls.length, calls);
 
-  // A new sign-in in a new Secret is accepted and clears the mark.
+  // A new sign-in in a new Secret is accepted and releases the sent one.
   const fresh = await createSecret(context, "refresh-token", "third-refresh-token");
   const updated = await controller.updateCredentialSource(administrator, {
     ...input,
@@ -1852,14 +1852,14 @@ test("a refresh update refuses to resend an issuer-rotated Secret an unfinished 
   await controller.deleteSecret(administrator, namespace.id, sent.id);
 });
 
-test("an update refused before its gateway write marks nothing and keeps an earlier pending Secret", async () => {
+test("an update refused before it stages retains nothing and keeps an earlier retained Secret", async () => {
   const context = await fixture();
   await context.makeReady();
   const { controller, namespace } = context;
   const { source } = await refreshSource(context);
   const input = { namespaceId: namespace.id, credentialSourceId: source.id };
   const sent = await createSecret(context, "client-secret", "sent-client-secret");
-  // A failed mint follows the gateway write, so the sent Secret stays pending.
+  // A failed mint follows the gateway write, so the sent Secret stays retained.
   context.refresh.nextRotate = async () => ({
     state: "failed",
     failureCode: "oauth_invalid_grant",
@@ -1873,9 +1873,9 @@ test("an update refused before its gateway write marks nothing and keeps an earl
   );
   context.refresh.nextRotate = undefined;
 
-  // The next update is refused at the gateway status check, which runs before OCC records its
-  // Secret, so it leaves no mark. The earlier mark stays: the gateway may still hold that
-  // Secret's material.
+  // The next update is refused at the gateway status check, which runs before OCC retains its
+  // Secret, so it retains nothing. The earlier Secret stays retained: the gateway may still hold
+  // its material.
   const next = await createSecret(context, "client-secret", "next-client-secret");
   const copy = context.gateway.stored.get(source.id);
   context.gateway.stored.delete(source.id);
@@ -1896,7 +1896,7 @@ test("an update refused before its gateway write marks nothing and keeps an earl
   );
 });
 
-test("deleting a source with a stale pending Secret succeeds and releases that Secret", async () => {
+test("deleting a source with a retained Secret succeeds and releases that Secret", async () => {
   const { controller, makeReady, modelSecret, namespace, passRegistrationFence } = await fixture();
   await makeReady();
   const original = await modelSecret();
@@ -1919,11 +1919,127 @@ test("deleting a source with a stale pending Secret succeeds and releases that S
     controller.deleteSecret(administrator, namespace.id, sent.id),
     referencedBy(source.id),
   );
-  // Deletion removes the gateway copy, so the mark goes with the record and never blocks it.
+  // Deletion removes the gateway copy, so the retained Secret goes with the record and never
+  // blocks it.
   passRegistrationFence();
   await controller.deleteCredentialSource(administrator, namespace.id, source.id);
   await controller.deleteSecret(administrator, namespace.id, sent.id);
   await controller.deleteSecret(administrator, namespace.id, original.id);
+});
+
+/**
+ * Runs `hook` once, right after OCC's next transaction commits: the boundary between an
+ * update's staging transaction and its gateway transaction.
+ */
+function afterNextCommit(state, hook) {
+  const transact = state.transact.bind(state);
+  state.transact = async (work) => {
+    delete state.transact;
+    const result = await transact(work);
+    await hook();
+    return result;
+  };
+}
+
+test("a later update that stops before its gateway write never releases a Secret the gateway may hold (finding 1398)", async () => {
+  const { controller, gateway, iamState, makeReady, modelSecret, namespace, state } =
+    await fixture();
+  await makeReady();
+  const recorded = await modelSecret();
+  const source = await controller.createCredentialSource(administrator, {
+    namespaceId: namespace.id,
+    name: "openai",
+    type: "openai",
+    secrets: { api_key: recorded.ref },
+  });
+  const input = { namespaceId: namespace.id, credentialSourceId: source.id };
+  const writes = () => gateway.calls.filter(({ operation }) => operation === "updateSource").length;
+  // The gateway accepts B, then the success commit fails: OCC records A, the gateway holds B.
+  const sent = await modelSecret();
+  await assert.rejects(
+    controller.updateCredentialSource(
+      administrator,
+      { ...input, secrets: { api_key: sent.ref } },
+      failingAudit,
+    ),
+    /audit append failed/,
+  );
+  assert.equal(writes(), 1);
+
+  // A request for C stages, then loses its update grant before the gateway step. Staging C
+  // must not displace B: the gateway still holds B.
+  const staged = await modelSecret();
+  const deny = {
+    id: "deny-source-update",
+    namespaceId: namespace.id,
+    action: "update",
+    resourceKind: "credential_source",
+    resourceId: source.id,
+    effect: "deny",
+  };
+  afterNextCommit(state, () => {
+    iamState.restrictions.push(deny);
+  });
+  await assert.rejects(
+    controller.updateCredentialSource(administrator, { ...input, secrets: { api_key: staged.ref } }),
+    AuthorizationDeniedError,
+  );
+  assert.equal(writes(), 1, "the denied update never reached the gateway");
+  for (const secret of [recorded, sent, staged]) {
+    await assert.rejects(
+      controller.deleteSecret(administrator, namespace.id, secret.id),
+      referencedBy(source.id),
+    );
+  }
+
+  // Authorized again, the update to C reaches the gateway and commits: the gateway holds only
+  // C now, so A and B are released.
+  iamState.restrictions.splice(iamState.restrictions.indexOf(deny), 1);
+  const updated = await controller.updateCredentialSource(administrator, {
+    ...input,
+    secrets: { api_key: staged.ref },
+  });
+  assert.deepEqual(updated.secrets, { api_key: staged.ref });
+  assert.equal(writes(), 2);
+  await controller.deleteSecret(administrator, namespace.id, sent.id);
+  await controller.deleteSecret(administrator, namespace.id, recorded.id);
+  await assert.rejects(
+    controller.deleteSecret(administrator, namespace.id, staged.id),
+    referencedBy(source.id),
+  );
+});
+
+test("of two overlapping updates only the later staged one writes the gateway", async () => {
+  const { controller, gateway, makeReady, modelSecret, namespace, state } = await fixture();
+  await makeReady();
+  const recorded = await modelSecret();
+  const source = await controller.createCredentialSource(administrator, {
+    namespaceId: namespace.id,
+    name: "openai",
+    type: "openai",
+    secrets: { api_key: recorded.ref },
+  });
+  const replacement = await modelSecret();
+  const input = {
+    namespaceId: namespace.id,
+    credentialSourceId: source.id,
+    secrets: { api_key: replacement.ref },
+  };
+  // A second request for the same replacement stages and completes between the first one's
+  // staging and its gateway step. The first then holds a stale fence and stops.
+  let later;
+  afterNextCommit(state, async () => {
+    later = await controller.updateCredentialSource(administrator, input);
+  });
+  await assert.rejects(
+    controller.updateCredentialSource(administrator, input),
+    (error) =>
+      error instanceof ResourceConflictError &&
+      error.message === "The credential source changed during the update.",
+  );
+  assert.deepEqual(later.secrets, { api_key: replacement.ref });
+  assert.equal(gateway.calls.filter(({ operation }) => operation === "updateSource").length, 1);
+  await controller.deleteSecret(administrator, namespace.id, recorded.id);
 });
 
 for (const [failure, gatewayOptions] of [

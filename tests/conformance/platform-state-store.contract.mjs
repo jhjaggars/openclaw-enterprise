@@ -2493,73 +2493,96 @@ async function verifyCredentialSourceContract(
     }),
   );
 
-  // An update records its replacement Secret as the field's pending Secret before the gateway
-  // write, because the gateway may hold that value before the update commits. Until then the
-  // source is a consumer of the pending Secret too, so the Secret cannot be deleted.
-  const pendingSource = { ...source, id: identifier("cs"), name: "Pending update " + randomUUID() };
+  // A legacy gateway update retains each replacement Secret and takes the update fence before
+  // the gateway write, because the gateway may hold that value before the update commits. The
+  // source is a consumer of every retained Secret until an update settles after its gateway
+  // write, so a retained Secret cannot be deleted.
+  const retainingSource = {
+    ...source,
+    id: identifier("cs"),
+    name: "Retaining update " + randomUUID(),
+  };
   const recordedRef = { kind: "secret", namespaceId: sourceNamespace.id, id: sourceSecret.id };
-  const setPending = (transaction, pending) =>
-    transaction.credentialSources.setCredentialSourcePendingSecrets(
+  const firstAttempt = randomUUID();
+  const laterAttempt = randomUUID();
+  const begin = (transaction, attemptId, retain) =>
+    transaction.credentialSources.beginCredentialSourceUpdate(
       sourceNamespace.id,
-      pendingSource.id,
-      pending,
+      retainingSource.id,
+      attemptId,
+      retain,
     );
+  const settle = (transaction, attemptId) =>
+    transaction.credentialSources.settleCredentialSourceUpdate(
+      sourceNamespace.id,
+      retainingSource.id,
+      attemptId,
+    );
+  const consumers = (secretId) =>
+    store.read((state) => state.secrets.listReferences(sourceNamespace.id, secretId, 50));
   await store.transact(async (transaction) => {
-    await transaction.credentialSources.createCredentialSource(pendingSource);
-    assert.deepEqual(await setPending(transaction, { api_key: replacementRef }), {
-      ...pendingSource,
-      pendingSecrets: { api_key: replacementRef },
+    await transaction.credentialSources.createCredentialSource(retainingSource);
+    assert.deepEqual(await begin(transaction, firstAttempt, { api_key: replacementRef }), {
+      ...retainingSource,
+      retainedSecrets: { api_key: [replacementRef] },
+      updateAttemptId: firstAttempt,
     });
   });
-  await store.read(async (state) => {
-    assert.deepEqual(
-      await state.secrets.listReferences(sourceNamespace.id, replacementSecret.id, 50),
-      { references: [{ kind: "credential_source", id: pendingSource.id }], truncated: false },
-    );
+  assert.deepEqual(await consumers(replacementSecret.id), {
+    references: [{ kind: "credential_source", id: retainingSource.id }],
+    truncated: false,
   });
   await assert.rejects(
     store.transact((transaction) =>
       transaction.secrets.deleteSecret(sourceNamespace.id, replacementSecret.id),
     ),
     { name: "ScopeViolationError", message: "The Secret is referenced by active platform state." },
-    "A pending Secret cannot be deleted while the gateway may hold it.",
+    "A retained Secret cannot be deleted while the gateway may hold it.",
   );
-  // Only the source's own fields take a mark, and null clears one.
+  // Only the source's own fields retain a Secret.
   await assert.rejects(
-    store.transact((transaction) => setPending(transaction, { other_key: replacementRef })),
+    store.transact((transaction) =>
+      begin(transaction, laterAttempt, { other_key: replacementRef }),
+    ),
     { name: "ScopeViolationError" },
   );
   await store.transact(async (transaction) => {
-    assert.deepEqual(await setPending(transaction, { api_key: null }), pendingSource);
-    await setPending(transaction, { api_key: replacementRef });
-    // The update's commit points the field at the Secret it sent and clears the mark.
-    assert.deepEqual(
-      await transaction.credentialSources.replaceCredentialSourceSecrets(
-        sourceNamespace.id,
-        pendingSource.id,
-        { api_key: replacementRef },
-      ),
-      { ...pendingSource, secrets: { api_key: replacementRef } },
+    // A later attempt adds to the retained set and takes the fence; the earlier Secret stays.
+    assert.deepEqual(await begin(transaction, laterAttempt, { api_key: recordedRef }), {
+      ...retainingSource,
+      retainedSecrets: {
+        api_key: [replacementRef, recordedRef].sort((left, right) =>
+          left.id < right.id ? -1 : 1,
+        ),
+      },
+      updateAttemptId: laterAttempt,
+    });
+    // Replacing the references leaves the retained Secrets alone; only the fenced attempt
+    // settles, and settling removes every retained Secret with the fence.
+    await transaction.credentialSources.replaceCredentialSourceSecrets(
+      sourceNamespace.id,
+      retainingSource.id,
+      { api_key: replacementRef },
     );
-    // A later update that fails after its gateway write leaves a stale mark behind.
-    await setPending(transaction, { api_key: recordedRef });
+    assert.equal(await settle(transaction, firstAttempt), undefined);
+    assert.deepEqual(await settle(transaction, laterAttempt), {
+      ...retainingSource,
+      secrets: { api_key: replacementRef },
+    });
+    // A later update that fails after its gateway write leaves a retained Secret behind.
+    await begin(transaction, firstAttempt, { api_key: recordedRef });
   });
-  // Deleting the source removes a stale mark with it; the mark never blocks the deletion.
+  // Deleting the source removes its retained Secrets; they never block the deletion.
   await store.transact(async (transaction) => {
     assert.equal(
       await transaction.credentialSources.deleteCredentialSource(
         sourceNamespace.id,
-        pendingSource.id,
+        retainingSource.id,
       ),
       true,
     );
   });
-  await store.read(async (state) => {
-    assert.deepEqual(
-      await state.secrets.listReferences(sourceNamespace.id, replacementSecret.id, 50),
-      { references: [], truncated: false },
-    );
-  });
+  assert.deepEqual(await consumers(replacementSecret.id), { references: [], truncated: false });
 
   // A non-model source binds through the Agent's credentialSources list. The draft and the
   // active revision each retain it, and a revision freezes exactly the draft's list.
