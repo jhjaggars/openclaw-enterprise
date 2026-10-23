@@ -77,6 +77,7 @@ export function bindPlatformUnitOfWork(
       "replaceCredentialSourceSecrets",
       "beginCredentialSourceUpdate",
       "settleCredentialSourceUpdate",
+      "abandonCredentialSourceUpdate",
       "recordEgressInstallation",
       "saveCredentialPolicyReduction",
       "rejectEgressMaterial",

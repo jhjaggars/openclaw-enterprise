@@ -1967,7 +1967,8 @@ test("a later update that stops before its gateway write never releases a Secret
   assert.equal(writes(), 1);
 
   // A request for C stages, then loses its update grant before the gateway step. Staging C
-  // must not displace B: the gateway still holds B.
+  // must not displace B: the gateway still holds B. C never reached the gateway, so the failed
+  // request releases C alone.
   const staged = await modelSecret();
   const deny = {
     id: "deny-source-update",
@@ -1988,12 +1989,16 @@ test("a later update that stops before its gateway write never releases a Secret
     AuthorizationDeniedError,
   );
   assert.equal(writes(), 1, "the denied update never reached the gateway");
-  for (const secret of [recorded, sent, staged]) {
+  for (const secret of [recorded, sent]) {
     await assert.rejects(
       controller.deleteSecret(administrator, namespace.id, secret.id),
       referencedBy(source.id),
     );
   }
+  const consumers = async (secret) =>
+    (await controller.transact((unit) => unit.secrets.listReferences(namespace.id, secret.id, 10)))
+      .references;
+  assert.deepEqual(await consumers(staged), []);
 
   // Authorized again, the update to C reaches the gateway and commits: the gateway holds only
   // C now, so A and B are released.
@@ -2010,6 +2015,47 @@ test("a later update that stops before its gateway write never releases a Secret
     controller.deleteSecret(administrator, namespace.id, staged.id),
     referencedBy(source.id),
   );
+});
+
+test("a refresh update that stops before its gateway write lets the same token be sent again (finding 1398)", async () => {
+  const context = await fixture();
+  await context.makeReady();
+  const { controller, namespace, state } = context;
+  const token = await createSecret(context, "refresh-token", "first-refresh-token");
+  const client = await createSecret(context, "client-secret", "synthetic-client-secret");
+  const source = await controller.createCredentialSource(administrator, {
+    namespaceId: namespace.id,
+    name: "oauth-user",
+    type: "oauth-user",
+    config: { client_id: "occ-tools" },
+    secrets: { refresh_token: token.ref, client_secret: client.ref },
+  });
+  const input = {
+    namespaceId: namespace.id,
+    credentialSourceId: source.id,
+    secrets: {
+      refresh_token: (await createSecret(context, "refresh-token", "second-refresh-token")).ref,
+      client_secret: client.ref,
+    },
+  };
+  // The gateway loses its copy between staging and the gateway step, so the update fails at
+  // the status check before any refresh configuration: the issuer never saw the new token.
+  const copy = context.gateway.stored.get(source.id);
+  afterNextCommit(state, () => {
+    context.gateway.stored.delete(source.id);
+  });
+  const calls = context.gateway.calls.length;
+  await assert.rejects(
+    controller.updateCredentialSource(administrator, input),
+    DependencyUnavailableError,
+  );
+  assert.equal(context.gateway.calls.length, calls, "no refresh configuration or mint");
+  context.gateway.stored.set(source.id, copy);
+  // Neither the token nor a fence is retained, so the same token is accepted, not refused as
+  // possibly issuer-rotated.
+  const updated = await controller.updateCredentialSource(administrator, input);
+  assert.deepEqual(updated.secrets, input.secrets);
+  await controller.deleteSecret(administrator, namespace.id, token.id);
 });
 
 test("of two overlapping updates only the later staged one writes the gateway", async () => {

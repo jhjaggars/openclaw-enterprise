@@ -6017,8 +6017,11 @@ export class OpenClawController {
    *   wins and this one stops before any gateway write. The gateway calls run under the source
    *   lock, which orders them against rotation, deletion, and Agent admission of this source;
    *   they do not hold the Namespace lock, because a refresh type's calls wait on the token
-   *   issuer. It then commits the references, removes the retained Secrets and the fence, and
-   *   appends `audit` together.
+   *   issuer. It repeats the Secret reads, since authorization or a value may have changed. It
+   *   then commits the references, removes the retained Secrets and the fence, and appends
+   *   `audit` together. If it fails before its gateway write begins, a separate transaction
+   *   releases the Secrets this attempt alone added and the fence, unless another attempt took
+   *   the fence; a crash or an unknown commit outcome leaves them retained.
    *
    * A failed commit leaves the gateway newer, and repeating the same request converges. Running
    * Harness processes keep the previous value. `failureAudit` builds the event committed on its
@@ -6034,7 +6037,7 @@ export class OpenClawController {
     this.assertCredentialSourceTransactionBoundary();
     this.namespaceIdentity(input.namespaceId);
     const attemptId = crypto.randomUUID();
-    const admitted = await this.mutate(async (state) => {
+    const staged = await this.mutate(async (state) => {
       const locked = await this.lockCredentialSourceForUpdate(state, principalId, input);
       const { namespace, source, gateway, type, secretRefs } = locked;
       if (
@@ -6051,14 +6054,14 @@ export class OpenClawController {
         if (audit !== undefined) {
           await state.audit.append(audit(updated));
         }
-        return updated;
+        return { admitted: updated };
       }
       if (type.rotation === "refresh") {
         // An unfinished update may already have sent a retained Secret's value to the issuer.
         refuseIssuerRotatedResend(type, source.retainedSecrets ?? {}, secretRefs);
       }
-      // The gateway step repeats these reads; making them first means a transient failure
-      // refuses the request before it retains a Secret that only a later update can release.
+      // The gateway step repeats these reads; making them first refuses most failures before
+      // this attempt retains anything.
       await this.readCredentialSourceSecrets(state, principalId, namespace, secretRefs);
       const placed = await this.credentialNamespace(namespace);
       if (type.rotation === "refresh") {
@@ -6077,6 +6080,15 @@ export class OpenClawController {
           ([field, reference]) => reference.id !== source.secrets[field]?.id,
         ),
       );
+      // Only the Secrets this attempt adds are its own to release if it stops before the gateway.
+      const added: Record<string, readonly string[]> = Object.fromEntries(
+        Object.entries(retain)
+          .filter(
+            ([field, reference]) =>
+              !(source.retainedSecrets?.[field] ?? []).some(({ id }) => id === reference.id),
+          )
+          .map(([field, reference]) => [field, [reference.id]]),
+      );
       if (
         (await state.credentialSources.beginCredentialSourceUpdate(
           namespace.id,
@@ -6087,16 +6099,35 @@ export class OpenClawController {
       ) {
         throw new ResourceStateConflictError("The credential source changed during the update.");
       }
-      return undefined;
+      return { added };
     });
-    if (admitted !== undefined) {
-      return admitted;
+    if ("admitted" in staged) {
+      return staged.admitted;
     }
+    let gatewayWriteBegan = false;
     return this.mutate(async (state) => {
+      this.registerRollback(async () => {
+        if (gatewayWriteBegan) {
+          return;
+        }
+        try {
+          await this.transact((released) =>
+            released.credentialSources.abandonCredentialSourceUpdate(
+              input.namespaceId,
+              input.credentialSourceId,
+              attemptId,
+              staged.added,
+            ),
+          );
+        } catch {
+          // The request already failed; a Secret left retained stays protected.
+        }
+      });
       const { namespace, source, gateway, type, secretRefs } =
         await this.lockCredentialSourceForUpdate(state, principalId, input);
       // Another update staged or settled since this one did; it owns the gateway write.
-      if (source.updateAttemptId !== attemptId) {
+      // Adoption is refused while the fence is set; this keeps a protected source unwritten.
+      if (source.updateAttemptId !== attemptId || source.egress !== undefined) {
         throw new ResourceStateConflictError("The credential source changed during the update.");
       }
       const values = await this.readCredentialSourceSecrets(
@@ -6119,6 +6150,7 @@ export class OpenClawController {
         const refresh = this.credentialRefreshDriver();
         status = await this.credentialGatewayOperation(() => gateway.sourceStatus(context()));
         assertCredentialGatewayHoldsSource(status);
+        gatewayWriteBegan = true;
         this.auditUncommittedCredentialEffect(failureAudit, "CREDENTIAL_REFRESH_UPDATE_FAILED");
         await this.credentialGatewayOperation(() =>
           refresh.configureRefresh(context(), {
@@ -6133,6 +6165,7 @@ export class OpenClawController {
         assertRefreshMinted(minted);
         status = { ...status, refresh: minted };
       } else {
+        gatewayWriteBegan = true;
         this.auditUncommittedCredentialEffect(failureAudit, "CREDENTIAL_GATEWAY_UPDATE_FAILED");
         status = await this.credentialGatewayOperation(() =>
           gateway.updateSource(context(), {

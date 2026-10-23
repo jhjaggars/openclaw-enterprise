@@ -474,6 +474,17 @@ export interface CredentialSourceRepository extends CredentialSourceReadReposito
     credentialSourceId: string,
     attemptId: string,
   ): Promise<Readonly<CredentialSource> | undefined>;
+  /**
+   * Ends the update `attemptId` that failed before any gateway write: removes only the
+   * retained Secrets it added (`release`, by field) and the fence. Returns `undefined` when
+   * the source is missing or another attempt holds the fence, whose update may rely on them.
+   */
+  abandonCredentialSourceUpdate(
+    namespaceId: string,
+    credentialSourceId: string,
+    attemptId: string,
+    release: Readonly<Record<string, readonly string[]>>,
+  ): Promise<Readonly<CredentialSource> | undefined>;
   /** Moves a registering source to `ready` once the gateway confirms its copy. */
   markCredentialSourceReady(
     namespaceId: string,
@@ -2381,6 +2392,26 @@ function repositories(
       }
       const { retainedSecrets: _retained, updateAttemptId: _attempt, ...settled } = current;
       const saved = immutableCopy(settled);
+      snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
+      return saved;
+    },
+    abandonCredentialSourceUpdate: async (namespaceId, credentialSourceId, attemptId, release) => {
+      const current = await findCredentialSource(namespaceId, credentialSourceId);
+      if (current === undefined || current.updateAttemptId !== attemptId) {
+        return undefined;
+      }
+      const retained: Record<string, SecretReference[]> = {};
+      for (const [field, references] of Object.entries(current.retainedSecrets ?? {})) {
+        const kept = references.filter(({ id }) => !(release[field] ?? []).includes(id));
+        if (kept.length > 0) {
+          retained[field] = kept;
+        }
+      }
+      const { retainedSecrets: _retained, updateAttemptId: _attempt, ...rest } = current;
+      const saved = immutableCopy({
+        ...rest,
+        ...(Object.keys(retained).length === 0 ? {} : { retainedSecrets: retained }),
+      });
       snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
       return saved;
     },

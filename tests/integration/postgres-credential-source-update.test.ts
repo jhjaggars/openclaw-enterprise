@@ -223,7 +223,8 @@ test(
     assert.equal((await f.request("DELETE", secretPath(sent))).status, 409);
 
     // A request for C stages, and a deny Restriction on this source commits while it does.
-    // Its gateway step is refused before any write, and staging C must not release B.
+    // Its gateway step is refused before any write, and staging C must not release B. C never
+    // reached the gateway, so the refused request releases C alone.
     const staged = await createSecret("staged");
     const readValue = secretDriver.withValue.bind(secretDriver);
     let restricted = false;
@@ -250,10 +251,10 @@ test(
     for (const [label, secret] of [
       ["recorded A", recorded],
       ["sent B, still held by the gateway", sent],
-      ["staged C", staged],
     ] as const) {
       assert.equal((await f.request("DELETE", secretPath(secret))).status, 409, label);
     }
+    assert.equal((await f.request("DELETE", secretPath(staged))).status, 204, "staged C");
   },
 );
 

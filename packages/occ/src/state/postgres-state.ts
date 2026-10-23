@@ -3098,6 +3098,39 @@ export class PostgresPlatformState implements PlatformStateStore {
         );
         return findCredentialSource(namespaceId, credentialSourceId);
       },
+      abandonCredentialSourceUpdate: async (
+        namespaceId,
+        credentialSourceId,
+        attemptId,
+        release,
+      ) => {
+        const abandoned = await client.query(
+          `UPDATE occ.credential_sources SET update_attempt_id = NULL
+           WHERE namespace_id = $1 AND id = $2 AND update_attempt_id = $3`,
+          [namespaceId, credentialSourceId, attemptId],
+        );
+        if (abandoned.rowCount !== 1) {
+          return undefined;
+        }
+        const rows = Object.entries(release).flatMap(([field, ids]) =>
+          ids.map((id) => [field, id] as const),
+        );
+        if (rows.length > 0) {
+          await client.query(
+            `DELETE FROM occ.credential_source_retained_secrets AS r
+             USING unnest($3::text[], $4::text[]) AS input(field, secret_id)
+             WHERE r.namespace_id = $1 AND r.credential_source_id = $2
+               AND r.field = input.field AND r.secret_id = input.secret_id`,
+            [
+              namespaceId,
+              credentialSourceId,
+              rows.map(([field]) => field),
+              rows.map(([, id]) => id),
+            ],
+          );
+        }
+        return findCredentialSource(namespaceId, credentialSourceId);
+      },
       markCredentialSourceReady: async (namespaceId, credentialSourceId) => {
         const updated = await client.query(
           `UPDATE occ.credential_sources AS cs SET state = 'ready'

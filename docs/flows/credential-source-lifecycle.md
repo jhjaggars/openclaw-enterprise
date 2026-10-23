@@ -205,7 +205,7 @@ in one transaction. Until then, Namespace deletion returns `NAMESPACE_NOT_EMPTY`
 `apps/controller/src/drivers/credential-gateway/openshell.ts:updateSource`
 
 The first transaction authorizes `credential_source:update`, reads the Namespace,
-locks only the source, and requires a ready source offered by the catalog (`409`
+locks the source, and requires a ready source offered by the catalog (`409`
 otherwise). Device-authorized sources reject PATCH before Secret reads or refresh
 changes. Static sources validate replacement references, authorize each
 `secret:operate`, and read through `withValue`. Gateway `updateSource` runs with
@@ -213,11 +213,11 @@ Compute's placement while the source lock is held; OpenShell requires matching
 ownership and nonempty values because `UpdateProvider` merges credentials.
 Only subsequently started processes receive the update.
 
-It also retains each replacement (`credential_source_retained_secrets`,
-a consumer) and sets a new `update_attempt_id`. A second requires that
-fence, writes the gateway, commits references, clears both and audits. A failed
-commit or crash releases nothing; live adoption meanwhile returns `409`. An
-absent/failed source returns `503`. Refresh updates use the
+It also retains each replacement (`credential_source_retained_secrets`, a
+consumer) and sets `update_attempt_id`. A second requires that fence, writes the
+gateway, commits references, clears both, audits. Failing earlier releases its
+own additions; a failed commit or crash releases nothing. Adoption meanwhile
+returns `409`; an absent/failed source, `503`. Refresh updates use the
 [Refresh Driver](credential-source-refresh.md#4-update-and-rotation).
 
 ### 9. Withdraw a source from an Agent
