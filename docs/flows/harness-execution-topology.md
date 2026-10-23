@@ -235,7 +235,8 @@ precede Pods for `WaitForFirstConsumer`; [Gateway storage](../reference/drivers/
 defines initialization and mounts.
 
 Workspace-file access uses the enrolled Harness node; Gateway and Harness share
-no workspace, session, skill or image mounts. The [storage contract](../reference/drivers/kubernetes-compute/storage-and-credentials.md#harness-storage)
+no workspace, session, skill or image mounts. Codex's Harness path is set before startup; pairing only enables file-transfer.
+The [storage contract](../reference/drivers/kubernetes-compute/storage-and-credentials.md#harness-storage)
 covers per-image assets and generated-image return. The node host stores bundles
 in its state and workspaces below `/home/node/workspace`, separate from gateway state,
 `CODEX_HOME` and credentials. Restart republishes image-owned assets and reconnects
