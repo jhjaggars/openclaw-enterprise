@@ -1662,14 +1662,16 @@ test("one Sandbox's open handles leave operation capacity to other Sandboxes", a
   const f = await syntheticDispatchFixture(t);
   const s = f.sandboxes();
   const held = new AbortController();
-  for (let i = 0; i < OPERATION_SANDBOX_SHARE; i += 1) {
-    assert.equal((await s.resolve("a", undefined, held.signal)).kind, "ready");
-  }
-  // Up to the old installation-wide cap, every further request is refused.
-  for (let i = OPERATION_SANDBOX_SHARE; i < OPERATION_CAPACITY; i += 1) {
-    assert.deepEqual(await s.resolve("a", undefined, held.signal), saturated);
+  // As many requests as the installation-wide cap, each holding its handle open.
+  const decisions = [];
+  for (let i = 0; i < OPERATION_CAPACITY; i += 1) {
+    decisions.push(await s.resolve("a", undefined, held.signal));
   }
   assert.equal((await s.resolve("b")).kind, "ready", "another Sandbox's first request");
+  assert.ok(decisions.slice(0, OPERATION_SANDBOX_SHARE).every((d) => d.kind === "ready"));
+  for (const decision of decisions.slice(OPERATION_SANDBOX_SHARE)) {
+    assert.deepEqual(decision, saturated, "a Sandbox holds at most its share");
+  }
   assert.equal(f.reads, OPERATION_SANDBOX_SHARE + 1, "a refused request starts no selection");
   // Closing the handles returns the share, and so does their deadline.
   held.abort();
@@ -1692,7 +1694,7 @@ test("requests still authenticating share a small budget charged before verifica
     exchangeOwner: {
       ...ports.exchangeOwner,
       async verify(name) {
-        if (gate) {
+        if (gate && name === "a") {
           if (++entered === OPERATION_AUTHENTICATION_BUDGET) {
             filled.resolve();
           }
