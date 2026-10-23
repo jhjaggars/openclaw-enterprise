@@ -8,11 +8,12 @@ author: freeqaz
 
 - **ID:** RFC-0025
 - **Created:** 2026-10-22
-- **Last updated:** 2026-10-22
+- **Last updated:** 2026-10-23
 - **RFC PR:** [#3233](https://github.com/openclaw/openclaw-enterprise/pull/3233)
-- **Related:** [Sandbox Driver contract](../../docs/reference/drivers/sandbox.md),
-  [Compute Driver contract](../../docs/reference/drivers/compute.md),
-  [controller worker flow](../../docs/flows/controller-worker.md)
+- **Related:** [Sandbox Driver contract](../../../docs/reference/drivers/sandbox.md),
+  [Compute Driver contract](../../../docs/reference/drivers/compute.md),
+  [controller worker flow](../../../docs/flows/controller-worker.md)
+- **Decisions:** [owner answers of 2026-10-23 and remaining choices](decisions.md)
 
 <a id="problem-and-decision"></a>
 
@@ -29,7 +30,7 @@ under the authority of the account that deployed the revision, is bounded, and s
 
 - `observeHarness` reads the Sandbox record, and `GET .../harness-status`, `occ agent get`, and the Console
   show **Sandbox lost**. Nothing acts on it; the documented remedy is to deploy a new version
-  ([Harness Sandbox status](../../docs/reference/drivers/sandbox.md#harness-sandbox-status)).
+  ([Harness Sandbox status](../../../docs/reference/drivers/sandbox.md#harness-sandbox-status)).
 - Kubernetes Compute declares no maintenance interval, so an ordinary dedicated revision gets no worker
   pass after activation. Preparing a stopped Sandbox fails with "has stopped; remove the stale Sandbox".
 - A revision with a standing repository approval and a lost Sandbox re-checks every 5 seconds or less,
@@ -67,15 +68,19 @@ their conditions are the same for a reboot and a stop.
 
 ### What OpenShell provides
 
-At the pinned OpenShell 0.1.4 (`5a7728c3`):
+At the pinned OpenShell 0.1.5 (`bdb956f2`):
 
 - After a node restart, the Kubernetes driver's 30-second reconcile suspends a Sandbox whose supervisor Pod
   is gone, with the same patch as `StopSandbox`. The Sandbox reads `STOPPED`. No field records whether a
   stop was requested. Only an explicit `StopSandbox` passes through the short `STOPPING` phase.
 - `StartSandbox` accepts `STOPPED`, `COMPLETED`, `STARTING`, an `ERROR` from a failed main process, and an
-  `ERROR` from a provisioning timeout after its cleanup. `READY` is a no-op. It refuses other `ERROR`
-  records. It needs the `sandbox:write` scope and workspace `user` role that OCC already holds.
-- A start keeps the Sandbox ID, stored spec, endpoints, and storage. It creates new Pods, rotates the
+  `ERROR` from a provisioning timeout after its cleanup. `READY` is a no-op. It needs the
+  `sandbox:write` scope and workspace `user` role that OCC already holds.
+- `StartSandbox` refuses any other `ERROR`, but `StopSandbox` now accepts one (upstream #4231), so
+  "stop, then start" recovers it in place.
+- A start keeps the Sandbox ID, stored spec, endpoints, and storage. All durable Agent state is on
+  OCE-owned volumes that only Agent deletion removes; OCE's mount under `/sandbox` turns off
+  OpenShell's own per-Sandbox volume ([what a Sandbox keeps](decisions.md#question-1-what-a-sandbox-keeps)). It creates new Pods, rotates the
   Sandbox's gateway token and bootstrap secrets, starts a new supervisor session, and admits the stored
   provider configuration again.
 - Each mutation sent with a `request_id` holds one of 1,000 durable admissions for OCC's identity, and a
@@ -88,7 +93,7 @@ At the pinned OpenShell 0.1.4 (`5a7728c3`):
    must also pass the maintenance preamble: its deployment did not fail terminally, no later saved revision
    requires stopped predecessors, and its required model credential is not withdrawn. Otherwise watching
    ends. After a failed redeploy, the predecessor stays down, as the
-   [exclusive replacement](../../docs/reference/drivers/compute.md) contract requires.
+   [exclusive replacement](../../../docs/reference/drivers/compute.md) contract requires.
 2. A watched revision without a maintenance chain gets one work item, `agent_revision:<id>:watch`, at
    activation, with the deploying account as actor. Each pass rereads the Agent under the claim, calls
    `observeRevision`, and defers the same item by the interval without evidence or audit. It does not
@@ -114,6 +119,8 @@ records an OCC stop before any effect, and OCC stops a revision by deleting its 
 - If a watch read sees `STOPPING`, someone called `StopSandbox`. The revision goes `lost` with
   `SANDBOX_STOPPED_EXTERNALLY` and is not resumed.
 - Otherwise, a `STOPPED` Sandbox of an Agent that OCC wants running counts as involuntary and is resumed.
+- Before OCC itself calls `StopSandbox` to recover an `ERROR`, the incident records it, so OCC's own
+  `STOPPING` is not read as an outside stop.
 
 OCC asks OpenShell for a durable stop reason. When one exists, OCC never resumes a requested stop.
 
@@ -127,6 +134,7 @@ OCC asks OpenShell for a durable stop reason. When one exists, OCC never resumes
 | First `lost`       | Observe again after 10 seconds.                                                           |
 | Second `lost`      | Open an incident and start recovery.                                                      |
 | Attempts exhausted | `lost`. Observe every 5 minutes; a later `running` closes it `recovered`.                 |
+| Lost again         | Within one hour of `recovered`, reopen the same incident with its attempt count.          |
 
 Attempts back off 0 s, 30 s, 1 min, 2 min, 5 min, and 10 min: six attempts in about 20 minutes. An attempt
 fails if the Sandbox does not serve 10 minutes after its start. The incident record owns the next attempt
@@ -136,7 +144,9 @@ time and is written in the same transaction as the work item.
 
 Under the Agent's work claim:
 
-1. Repeat the watch checks.
+1. Repeat the watch checks, and require the Agent's Harness volume to be the one recorded at
+   activation: present, bound, not deleting, same UID. Otherwise the incident ends `lost` with
+   `HARNESS_STORAGE_MISSING` and recovery creates nothing.
 2. Reauthorize as maintenance does: `deploy` on the Agent as the deploying account, the Backend binding,
    the revision's credential sources, pending credential withdrawals, and repository authority. A refusal
    ends the incident `lost` with the refusal code.
@@ -146,6 +156,7 @@ Under the Agent's work claim:
    - decides from the read whether a start is allowed, and makes no call when it is not;
    - refreshes the workspace node setup material before the start;
    - rereads the Agent's desired state and pending withdrawals;
+   - for an `ERROR` that `StartSandbox` refuses (question 1), records its own stop and calls `StopSandbox` first;
    - calls `StartSandbox` for at most 60 seconds. A timeout means the start continues; the next pass
      observes it.
 4. When the Sandbox reads `running`, run the revision's normal maintenance preparation. Success closes the
@@ -161,17 +172,21 @@ then deletes the resumed Sandbox.
 
 ### Fallbacks
 
-- **Missing Sandbox:** maintenance preparation already creates it again for revisions without Git.
-- **Unstartable `ERROR`** (question 1): delete the Sandbox and create it again for the **same** revision.
-  Agent workspaces and the runtime home are on Compute-owned volumes. Never for repository Git revisions.
+- **Missing Sandbox:** maintenance preparation already creates it again for revisions without Git. It
+  binds the same volumes and runtime-home subpath, so it keeps the same state, and it now passes the
+  volume check first.
+- **Unstartable `ERROR`:** stop, then start, keeping the same Sandbox and volumes. Question 1 asks the
+  owner to approve this and the missing-Sandbox case, both only under the volume check. Never for
+  repository Git revisions.
 - **New revision:** never automatic.
 
 ### Repository Git revisions
 
 A resumed Sandbox has new Pods and a new supervisor. The Git route pins both, so it closes for good. In
-the first delivery, a lost Git revision goes `lost` with "deploy a new version". Its work item is
-completed and queued again at 5 minutes, never failed permanently, because a permanent failure retires the
-runtime. A later delivery may re-attach Git after its own security review. It must:
+the first delivery, a lost Git revision goes `lost` with **Deploy again** (option A of
+[question 2](decisions.md#question-2-repository-git-options)). Its work item is completed and queued
+again at 5 minutes, never failed permanently, because a permanent failure retires the runtime. If the
+owner chooses re-attachment (option B), a later delivery needs its own security review and must:
 
 1. withdraw the old Git provider generation before the start, because OpenShell re-admits stored providers;
 2. keep the old route and standing execution closed, and adopt nothing;
@@ -185,9 +200,13 @@ runtime. A later delivery may re-attach Git after its own security review. It mu
 - A table holds each revision's last incident: state, times, attempts, next attempt, last observation,
   outcome, and whether a stop was seen.
 - `GET .../harness-status` adds `recovery` (`state`, `since`, `attempts`, `maxAttempts`, `nextAttemptAt`,
-  `code`, `recoveredAt`). `occ agent get` prints it. Agent lists may show `harnessHealth` from the table
-  without a Driver call (question 4).
-- The Console's **Live serving** shows recovering, recovered, stalled, or lost with the reason.
+  `code`, `recoveredAt`, `hint`). `occ agent get` prints it.
+- Agent lists show a **Health** badge from the table, without a Driver call: Recovering, Stalled,
+  Stopped outside OCE, or Needs attention. Running Agents show none.
+- The Console's **Live serving** shows a plain message, a "Likely cause" hint from OpenShell platform
+  events, and **Start**, **Try again**, or **Deploy again**. Raw phases and events stay in a collapsed
+  details block ([user experience](decisions.md#what-the-user-sees)).
+- **Start** and **Try again** (`occ agent recover`) need `operate` on the Agent and open a new incident.
 - Deployment status adds `HARNESS_RECOVERING`, `HARNESS_RECOVERED`, `HARNESS_STALLED`, `HARNESS_LOST`, and a
   message for `REPOSITORY_EXECUTION_UNVERIFIED`.
 - The worker emits `worker.harness-recovery`. Metrics: `occ_harness_recovery_attempts_total{outcome}`,
@@ -202,7 +221,8 @@ All are optional. A Driver without them keeps today's behavior plus the status.
 - `ComputeDriver.resumeRevision?(revision, context, signal)`
 - `SandboxDriver.resumeHarness?(context)`
 - `observeHarness` lost code `SANDBOX_STOPPING`
-- OCC's OpenShell protocol copy adds `StartSandbox` and the Sandbox readiness reason.
+- OCC's OpenShell protocol copy adds `StartSandbox`, `StopSandbox`, and the Sandbox conditions.
+- The revision records its Harness volume UID at activation.
 
 ### Request lifecycle
 
@@ -235,20 +255,24 @@ sequenceDiagram
 
 ## Delivery and verification
 
-1. Status only: watch items, seeding, incident table, `lost` and `stalled`, and a bounded 5-second loop.
-2. Resume for revisions without Git, with audit, metrics, and docs.
-3. Delete and create for an unstartable `ERROR`, if question 1 is accepted and the case occurs.
-4. Git route epochs, after a security review.
+1. Status only: watch items, seeding, incident table, list badges, hints, `lost` and `stalled`,
+   **Deploy again** for Git revisions, and a bounded 5-second loop.
+2. Resume for revisions without Git, under the volume check, with **Start**, **Try again**, audit,
+   metrics, and docs.
+3. Stop then start for an unstartable `ERROR`, and creating a missing Sandbox again, if the owner
+   approves question 1.
+4. Git re-attachment, if the owner chooses it in question 2, after a security review.
 
 Required evidence:
 
-- Shared test helpers: one fake OpenShell gateway with `StartSandbox`, `STOPPING`, and scripted phases, and
+- Shared test helpers: one fake OpenShell gateway with `StartSandbox`, `StopSandbox`, `STOPPING`, and scripted phases, and
   one PostgreSQL worker fixture for watched revisions.
 - Worker integration with the real queue: a reboot resumes once and closes `recovered`; `STOPPING` blocks
   resume; an OCC stop, a saved successor, a withdrawn model credential, or a revoked account calls nothing;
   an unreadable gateway spends no attempt; two workers start once; a Git revision never fails permanently;
-  the watch item adds no rows. Each case has a mutant that it catches.
-- Real OpenShell 0.1.4 on k3d: restart the node under a dedicated Codex and a native OpenClaw Agent; each
+  a missing or replaced volume creates nothing; OCC's own stop is not read as an outside stop; the watch
+  item adds no rows. Each case has a mutant that it catches.
+- Real OpenShell 0.1.5 on k3d: restart the node under a dedicated Codex and a native OpenClaw Agent; each
   must read `recovered` and complete a chat turn. Record the phases after a node restart, a deleted
   supervisor or workload Pod, a drain, and an out-of-band stop. This also shows whether a resumed native
   node host reconnects.
@@ -258,7 +282,8 @@ Required evidence:
 ## Rationale and alternatives
 
 - **Automatic new revision:** re-admits current settings and closes Git access. The owner asked to avoid it.
-- **Recreate before resume:** replaces the Sandbox's identity. Kept only for an unstartable `ERROR`.
+- **Recreate before resume:** replaces the Sandbox's identity. Stop then start covers an unstartable
+  `ERROR` in place.
 - **Gateway self-report or Kubernetes controller:** see [Ownership](#ownership).
 - **OpenShell list or watch:** `ListSandboxes` has no phase filter and `WatchSandbox` is one stream per
   Sandbox. A cached per-workspace list can replace per-revision reads if cost requires it.
@@ -266,26 +291,31 @@ Required evidence:
   per revision is used instead.
 - **Keep today's behavior:** every node restart needs a manual deploy of each dedicated Agent.
 
+## Decisions (owner, 10-23)
+
+- **Out-of-band stop:** resume a `STOPPED` Sandbox when no `STOPPING` was seen. The worker reads the
+  phase, conditions, and platform events; each edge case has a decision and a user-facing state
+  ([edge cases](decisions.md#edge-cases)).
+- **Status scope:** Agent lists show a Health badge, and messages carry plain-language cause hints from
+  node and Pod events. Hints never trigger or block an action.
+- **Defaults:** a 60-second interval (the only operator setting), six attempts in about 20 minutes,
+  then every 5 minutes, and `stalled` after 15 minutes.
+
 ## Unresolved questions
 
-The owner decides each question.
+The owner decides both. Evidence and options are in [the decisions companion](decisions.md).
 
-1. **Unstartable `ERROR`.** May OCC delete and create the Sandbox again for the same revision, without Git?
-   Proposed: yes, if the node-restart proof shows the case occurs on 0.1.4.
-2. **Repository Git.** Re-attach through route epochs, or keep "deploy a new version"? Proposed: `lost`
-   first, epochs after a security review.
-3. **Out-of-band stop.** Resume a `STOPPED` Sandbox when no `STOPPING` was seen (proposed), or never resume
-   `STOPPED`, which also leaves reboots down?
-4. **Status scope.** Show `harnessHealth` in Agent lists, and label messages with Kubernetes node events as
-   a hint?
-5. **Footprint and defaults.** One watch item and about three API calls per dedicated Agent per interval;
-   60 or 120 seconds; six attempts in about 20 minutes; `stalled` after 15 minutes.
+1. **Automatic rebuild.** Disk and chat history are kept: they live on OCE-owned volumes, not in the
+   Sandbox. Proposed: rebuild (stop then start, or create again) only when the Agent's recorded volume is
+   still there; otherwise show **Needs your decision**, because a new volume would be empty.
+2. **Repository Git.** A: deploy again (proposed now). B: resume and re-attach Git through route epochs.
+   C: resume without Git until a deploy. D: an automatic new version.
 
 ## References
 
-- [Sandbox Driver contract](../../docs/reference/drivers/sandbox.md)
-- [Compute Driver contract](../../docs/reference/drivers/compute.md)
-- [Controller worker flow](../../docs/flows/controller-worker.md)
-- [Agent troubleshooting](../../docs/guides/topics/agent-troubleshoot.md)
-- OpenShell 0.1.4: `proto/openshell.proto`, `crates/openshell-server/src/compute/mod.rs`,
+- [Sandbox Driver contract](../../../docs/reference/drivers/sandbox.md)
+- [Compute Driver contract](../../../docs/reference/drivers/compute.md)
+- [Controller worker flow](../../../docs/flows/controller-worker.md)
+- [Agent troubleshooting](../../../docs/guides/topics/agent-troubleshoot.md)
+- OpenShell 0.1.5: `proto/openshell.proto`, `crates/openshell-server/src/compute/mod.rs`,
   `crates/openshell-driver-kubernetes/src/driver.rs`
