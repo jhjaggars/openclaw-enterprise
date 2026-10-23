@@ -210,7 +210,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 	}
 	fmt.Fprintf(r.opts.Out, "Creating Kubernetes-only k3d cluster %s...\n", state.Cluster)
 	admissionPath := ""
-	if sandboxDriver == "openshell" {
+	if sandboxDriver == "openshell" && !(state.openShellExternal != nil && state.openShellExternal.managed) {
 		admissionPath, err = prepareOpenShellAdmission(directory)
 		if err != nil {
 			return err
@@ -237,7 +237,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 	timeout := time.Duration(timeoutSeconds) * time.Second
 
 	var assets *openShellDevelopmentAssets
-	if sandboxDriver == "openshell" {
+	if sandboxDriver == "openshell" && !(state.openShellExternal != nil && state.openShellExternal.managed) {
 		fmt.Fprintln(r.opts.Out, "Preparing pinned OpenShell development assets...")
 		assets, err = r.prepareOpenShell(ctx, state, timeout)
 		if err != nil {

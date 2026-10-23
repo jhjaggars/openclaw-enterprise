@@ -20,7 +20,10 @@ export OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_SECRET_FILE=/secure/openshell-clien
 
 The endpoint must be an `http` or `https` origin without a path; the
 client-secret file must exist and be nonempty. The four variables select the
-external gateway together or not at all.
+external gateway together or not at all. Set
+`OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE=managed` to render the managed
+Sandbox Driver configuration; the profile then installs no local OpenShell
+assets because the gateway owns every sandbox-side Kubernetes object.
 
 ## What the launcher changes
 
