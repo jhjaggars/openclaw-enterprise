@@ -1,6 +1,6 @@
 import { verifyNamedWorkspace } from "./named-workspace.ts";
 import { installEgressAuthority } from "./egress-authority.ts";
-import { installationDriverConfigurations } from "./installation-config.ts";
+import { installationControllerOptions } from "./installation-config.ts";
 import type { AuditEvent } from "@openclaw-enterprise/contracts";
 import {
   validateAuthAccountPrincipalSeed,
@@ -292,8 +292,7 @@ export async function composeProduction(
 
     phaseCompleted("computePreflight");
     const controller = new OpenClawController(persistedInstallation, {
-      driverConfigurations: installationDriverConfigurations(config.drivers.installation),
-      sandboxNetworkPolicyCeiling: config.drivers.installation.sandboxNetworkPolicyCeiling ?? [],
+      ...installationControllerOptions(config.drivers.installation),
       state,
       ...(config.drivers.tokenService && { preparedTokens: config.drivers.tokenService }),
       recordOperations: true,
@@ -302,9 +301,6 @@ export async function composeProduction(
       bundledPresetVersions: config.drivers.bundledPresetVersions ?? [],
       refreshBundledDefaultPresets: config.drivers.installation.presets?.includeDefaults === true,
       loggingLevel: config.drivers.installation.logging.level,
-      ...(installation.runtime === undefined
-        ? {}
-        : { nativeWorkerSupport: installation.runtime.nativeWorkerSupport }),
     });
     controller.registerDriver(iamDriver);
     controller.selectDriver("iam", driverId);

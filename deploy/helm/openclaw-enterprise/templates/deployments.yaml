@@ -372,6 +372,7 @@ spec:
             - name: OCC_NAMED_WORKSPACE
               value: {{ $.Values.namedWorkspace | toJson | quote }}
             {{- end }}
+            {{- include "openclaw.listenerEnv" $ | trim | nindent 12 }}
             {{- with $.Values.preprovisionedNamespace }}
             - name: OCC_PREPROVISIONED_NAMESPACE
               value: {{ . | toJson | quote }}

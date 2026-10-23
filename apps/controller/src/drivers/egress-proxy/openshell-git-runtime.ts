@@ -35,9 +35,11 @@ import {
   type OpenShellGitRouteRecord,
   type OpenShellGitRouteSnapshot,
   type OpenShellGitRouteStore,
+  type OpenShellGitRouteWithdrawal,
   PostgresOpenShellGitRouteStore,
 } from "./openshell-git-route-store.ts";
 import {
+  deleteOpenShellPreparedGitProvider,
   OpenShellPreparedGitProvider,
   OpenShellPreparedGitProviderError,
   type OpenShellPreparedGitBinding,
@@ -215,6 +217,9 @@ interface Entry extends OpenShellGitObservationEntry {
       }
     | undefined;
   nextObserveAt?: number | undefined;
+  /** A provider write this worker reserved at this fence and never sent, whose cancellation
+   * the store did not confirm: the next pass clears it before anything else. */
+  unsentWrite?: number | undefined;
   /** The persisted route's adoption fence this worker holds; absent without a route store. */
   fence?: number | undefined;
   /** The material the persisted generation was written with, until the material is read
@@ -227,6 +232,12 @@ interface Entry extends OpenShellGitObservationEntry {
   persisted?: OpenShellGitRouteSnapshot | undefined;
   /** Why the owner last had no material: the session is gone, or none is usable (finding 2149). */
   absent?: "withdrawn" | "unprepared" | undefined;
+  /** A closed route's next Sandbox read, the reads that found it, whether the last found none,
+   * and whether a read was refused by the worker's identity (reported once): release() drops
+   * the entry once the Sandbox is gone (finding 2218). */
+  release?:
+    | { at: number; present: number; absent?: true | undefined; refused?: true | undefined }
+    | undefined;
 }
 interface EntryState {
   entry?: Entry;
@@ -252,8 +263,15 @@ const REFRESH_INTERVAL_MS = 10_000;
 // A failed read is observed again after 1 s, doubling to this cap. A replaced OpenShell
 // Gateway Pod answers again within about 30 s; the route is back on the next read after that.
 const OBSERVE_BACKOFF_CAP_MS = 10_000;
+// A closed route's Sandbox is read after one refresh interval, doubling to this cap while it
+// stays (a Sandbox retained after Git expiry can run for a long time).
+const RELEASE_INTERVAL_CAP_MS = 60_000;
 /** The revision's route is a tombstone: Compute fails the revision with that cause instead of
  * retrying a preparation that can never succeed (a new revision is required). */
+/** The store closed the route at this worker's fence: another worker withdrew the revision or
+ * expired its access, and the row already says why (finding 2218). */
+class OpenShellGitRouteClosedError extends OpenShellGitRouteError {}
+
 export class OpenShellGitRouteBlockedError extends Error {
   readonly reason: OpenShellGitRouteBlockReason;
 
@@ -333,6 +351,31 @@ function revisionIdentity(revision: Readonly<AgentRevision>): Readonly<Record<st
   };
 }
 
+/**
+ * Whether a persisted route is this revision's own, recorded by a bootstrap that was refused
+ * before its write and whose reservation was cleared (finding 2210): no provider generation,
+ * no observation, no material and no write pending. Only such a route may bootstrap again;
+ * anything else is adopted with the full verification.
+ */
+function unsentBootstrap(
+  persisted: OpenShellGitRouteRecord,
+  revision: Readonly<AgentRevision>,
+  workspace: string,
+  sandbox: string,
+): boolean {
+  return (
+    persisted.blocked === undefined &&
+    persisted.writePending === undefined &&
+    persisted.generation === undefined &&
+    persisted.observed === undefined &&
+    persisted.material === undefined &&
+    persisted.namespaceId === revision.namespaceId &&
+    persisted.agentId === revision.agentId &&
+    persisted.workspace === workspace &&
+    persisted.sandbox === sandbox
+  );
+}
+
 /** A network policy or Agent network grant that would open a route beside the middleware. */
 export interface OpenShellGitPolicyOverlap {
   readonly name: string;
@@ -371,6 +414,10 @@ function isIpAddressHost(host: string): boolean {
 export class OpenShellGitRuntime {
   private readonly entries = new Map<string, Promise<Entry>>();
   private readonly states = new Map<string, EntryState>();
+  /** Bootstrap reservations this worker never sent and could not yet cancel, by revision. */
+  private readonly unsentBootstraps = new Map<string, number>();
+  /** One reconcile pass's read budget; a provider write has its own deadline. */
+  private observeTimeoutMs = OBSERVE_TIMEOUT_MS;
   private owner: Owner | undefined;
   private emit: OpenShellGitRuntimeEmit | undefined;
   private routes: OpenShellGitRouteStore | undefined;
@@ -430,6 +477,9 @@ export class OpenShellGitRuntime {
     signal: AbortSignal,
     cold?: () => Promise<StandingGitExecution | undefined>,
   ) {
+    if (this.states.get(revision.id)?.blocked !== undefined) {
+      return;
+    }
     const entry = await this.entries.get(revision.id);
     if (!entry && revision.executionAdmission?.version === 6) {
       return;
@@ -567,6 +617,16 @@ export class OpenShellGitRuntime {
         if (pastDeadline && !known && !preview) {
           throw new OpenShellGitRouteBlockedError("repository_expired");
         }
+        // This worker's last bootstrap was refused before its write, and the store did not
+        // confirm clearing the reservation: clear it now, before the fence moves. A store that
+        // answers false holds no such reservation any more; adoption reads the row as it is.
+        // Without another pass the row keeps its pending write, which reads as unknown: closed.
+        const unsent = this.unsentBootstraps.get(revision.id);
+        const routes = this.routes;
+        if (unsent !== undefined && routes !== undefined) {
+          await read(() => routes.cancelWriting(revision.id, unsent), signal);
+        }
+        this.unsentBootstraps.delete(revision.id);
         const persisted = await read(
           () =>
             this.routes?.adopt(revision.id, this.instance, preview ? "close-preview" : undefined) ??
@@ -586,16 +646,40 @@ export class OpenShellGitRuntime {
             // even if the old worker stopped before its terminal reason could be recorded.
             throw new OpenShellGitRouteBlockedError(persisted.blocked ?? "worker_replaced");
           }
-          return this.adopt(revision, client, workspace, sandbox, signal, otherProviders, {
-            scope,
-            persisted,
-          });
+          if (!unsentBootstrap(persisted, revision, workspace, sandbox)) {
+            return this.adopt(revision, client, workspace, sandbox, signal, otherProviders, {
+              scope,
+              persisted,
+            });
+          }
         }
         if (credentials.deadlineWallMs <= Date.now()) {
           throw new OpenShellGitRouteBlockedError("repository_expired");
         }
-        await checkOpenShellGitProviders(client, workspace, otherProviders, signal);
-        const current = await client.getSandbox({ workspace, name: sandbox }, signal);
+        // A read that fails here is read again on the next pass, nothing written (finding
+        // 2210); a refused identity or an overlapping provider is final. A route already on
+        // record is closed in the store with that reason too, as adoption closes it.
+        const verified = async <T>(operation: () => Promise<T>): Promise<T> => {
+          try {
+            return await read(operation, signal);
+          } catch (error) {
+            if (persisted !== undefined && error instanceof OpenShellGitRouteError) {
+              await routes?.block(revision.id, persisted.fence, error.reason).catch(() => {});
+              this.emit?.({
+                event: "worker.error",
+                code: "OPENSHELL_GIT_RECONCILIATION_REQUIRED",
+                reason: error.reason,
+                ...revisionIdentity(revision),
+              });
+              throw new OpenShellGitRouteBlockedError(error.reason);
+            }
+            throw error;
+          }
+        };
+        await verified(() => checkOpenShellGitProviders(client, workspace, otherProviders, signal));
+        const current = await verified(() =>
+          client.getSandbox({ workspace, name: sandbox }, signal),
+        );
         if (current) {
           // The rejected bootstrap is retained below, so this logs once per revision while
           // every later pass (maintenance included) rethrows the same failure. The Sandbox
@@ -612,14 +696,16 @@ export class OpenShellGitRuntime {
         const provider = gitProvider(
           client,
           workspace,
-          await this.gateway(client, workspace, signal),
+          await verified(() => this.gateway(client, workspace, signal)),
           sandbox,
           revision.id,
           scope.delivery,
           preview ? true : undefined,
         );
         const bindingId =
-          revision.egressPlan?.execution.executionId ?? randomBytes(24).toString("base64url");
+          persisted?.bindingId ??
+          revision.egressPlan?.execution.executionId ??
+          randomBytes(24).toString("base64url");
         const route = {
           revisionId: revision.id,
           namespaceId: revision.namespaceId,
@@ -631,10 +717,28 @@ export class OpenShellGitRuntime {
         // The route is on record, with its bootstrap write pending, before the write: a
         // worker that finds the write still pending knows its outcome was lost. A store
         // that does not answer here is read again on the next pass, nothing written.
-        await read(() => this.routes?.open(route, this.instance) ?? Promise.resolve(), signal);
+        let fence = 1;
+        if (persisted === undefined) {
+          await read(() => this.routes?.open(route, this.instance) ?? Promise.resolve(), signal);
+        } else {
+          // The route is on record from a bootstrap that was refused before its write and
+          // cleared: reserve the bootstrap write again at the adopted fence. A route that moved
+          // meanwhile is read again on the next pass.
+          const reserved = await read(
+            () => routes!.writing(revision.id, persisted.fence, "bootstrap"),
+            signal,
+          );
+          if (reserved === undefined) {
+            throw new OpenShellGitObservationError(
+              "read_failed",
+              new Error("OpenShell Git route changed before its bootstrap."),
+            );
+          }
+          fence = reserved;
+        }
         if (credentials.deadlineWallMs <= Date.now()) {
           // The initial deadline passed while recording intent; this worker has not sent a write.
-          await this.routes?.block(revision.id, 1, "repository_expired").catch(() => {});
+          await this.routes?.block(revision.id, fence, "repository_expired").catch(() => {});
           throw new OpenShellGitRouteBlockedError("repository_expired");
         }
         let binding: OpenShellPreparedGitBinding;
@@ -642,9 +746,15 @@ export class OpenShellGitRuntime {
           binding = await provider.bootstrap(signal);
         } catch (error) {
           if (error instanceof OpenShellPreparedGitProviderError && error.outcome === "refused") {
+            if (error.readFailure !== undefined && !preview) {
+              // A gateway read before the write failed: nothing was sent. Clear the
+              // reservation and bootstrap again on the next pass (finding 2210).
+              await this.cancelBootstrap(revision.id, fence, signal);
+              throw new OpenShellGitObservationError(error.readFailure, error);
+            }
             // Nothing was written: the row says so, instead of outliving this attempt as a
             // pending write (which a later worker would have to read as write_unknown).
-            await this.routes?.block(revision.id, 1, "bootstrap_failed").catch(() => {});
+            await this.routes?.block(revision.id, fence, "bootstrap_failed").catch(() => {});
           }
           throw error;
         }
@@ -657,7 +767,7 @@ export class OpenShellGitRuntime {
           otherProviders: [...otherProviders],
           bindingId,
           ...(preview && { preview: new ObservedHookPreview(workspace, bindingId) }),
-          ...(this.routes === undefined ? {} : { fence: 1 }),
+          ...(this.routes === undefined ? {} : { fence }),
         };
         // The written generation is recorded now; a store that does not answer leaves the
         // bootstrap marked pending until the next verified pass records it (a worker that
@@ -844,9 +954,9 @@ export class OpenShellGitRuntime {
       }
       throw error;
     }
-    // A gateway that does not answer here is read again on the next pass (each retry moves
-    // the fence again); one that refuses the worker's identity, or a middleware that is not
-    // registered, blocks the route with that reason, as the bootstrap path does.
+    // A gateway that does not answer here, or whose middleware is not registered (yet), is
+    // read again on the next pass (each retry moves the fence again); one that refuses the
+    // worker's identity blocks the route with that reason, as the bootstrap path does.
     let workspaceId: string;
     try {
       workspaceId = await read(() => this.gateway(client, workspace, signal), signal);
@@ -935,12 +1045,29 @@ export class OpenShellGitRuntime {
       return;
     }
     if (!(await read(() => routes.record(entry.revision.id, fence, snapshot), signal))) {
-      throw new OpenShellGitRouteError(
-        "worker_replaced",
-        "OpenShell Git route was adopted by another worker.",
-      );
+      throw await this.refusal(entry, fence, signal);
     }
     entry.persisted = snapshot;
+  }
+
+  /**
+   * Why the store refused this holder, as the error that closes the route. A route closed at
+   * this fence names its own reason: another worker withdrew the revision or expired its
+   * access, and the Agent is told so (finding 2218). Otherwise another worker took it over.
+   */
+  private async refusal(
+    entry: Entry,
+    fence: number,
+    signal: AbortSignal,
+    held?: boolean | OpenShellGitRouteBlockReason,
+  ): Promise<OpenShellGitRouteError> {
+    held ??= await read(() => this.routes!.owns(entry.revision.id, fence), signal);
+    return typeof held === "string"
+      ? new OpenShellGitRouteClosedError(held, "OpenShell Git route was closed by another worker.")
+      : new OpenShellGitRouteError(
+          "worker_replaced",
+          "OpenShell Git route was adopted by another worker.",
+        );
   }
 
   /** Whether this worker still holds the route; a provider write is marked before it runs. */
@@ -955,34 +1082,63 @@ export class OpenShellGitRuntime {
     if (routes === undefined || fence === undefined) {
       return;
     }
-    const held = await read<boolean | number | undefined>(
-      () =>
-        write === undefined
-          ? routes.owns(entry.revision.id, fence)
-          : routes.writing(entry.revision.id, fence, write, material),
+    if (write === undefined) {
+      const held = await read(() => routes.owns(entry.revision.id, fence), signal);
+      if (held !== true) {
+        throw await this.refusal(entry, fence, signal, held);
+      }
+      return;
+    }
+    const reserved = await read(
+      () => routes.writing(entry.revision.id, fence, write, material),
       signal,
     );
-    if (typeof held === "number") {
-      entry.fence = held;
+    if (reserved === undefined) {
+      throw await this.refusal(entry, fence, signal);
     }
-    if (!held) {
-      throw new OpenShellGitRouteError(
-        "worker_replaced",
-        "OpenShell Git route was adopted by another worker.",
-      );
-    }
+    entry.fence = reserved;
   }
 
+  /**
+   * Clears this worker's own write reservation, proven unsent. A store that does not answer
+   * leaves it reserved: the entry remembers it, and the next pass clears it before anything
+   * else, so a store outage never turns an unsent write into an unknown one.
+   */
   private async cancelWriting(entry: Entry, signal: AbortSignal): Promise<void> {
-    if (
-      this.routes &&
-      entry.fence !== undefined &&
-      !(await read(() => this.routes!.cancelWriting(entry.revision.id, entry.fence!), signal))
-    ) {
-      throw new OpenShellGitRouteError(
-        "write_unknown",
-        "Cannot confirm cancellation of the unsent write.",
-      );
+    const routes = this.routes;
+    const fence = entry.fence;
+    if (routes === undefined || fence === undefined) {
+      return;
+    }
+    const retry = entry.unsentWrite === fence;
+    entry.unsentWrite = fence;
+    if (!(await read(() => routes.cancelWriting(entry.revision.id, fence), signal))) {
+      if (!retry) {
+        throw new OpenShellGitRouteError(
+          "write_unknown",
+          "Cannot confirm cancellation of the unsent write.",
+        );
+      }
+      // The earlier attempt committed and only its answer was lost: a fence this worker still
+      // holds has no write pending. Another worker's fence stops this one.
+      await this.fenced(entry, signal);
+    }
+    entry.unsentWrite = undefined;
+  }
+
+  /** Clears a bootstrap reservation proven unsent; the next prepare() retries a store that
+   * did not answer, before it adopts the route. */
+  private async cancelBootstrap(revisionId: string, fence: number, signal: AbortSignal) {
+    const routes = this.routes;
+    if (routes === undefined) {
+      return;
+    }
+    this.unsentBootstraps.set(revisionId, fence);
+    try {
+      await read(() => routes.cancelWriting(revisionId, fence), signal);
+      this.unsentBootstraps.delete(revisionId);
+    } catch {
+      // Retained for the next pass.
     }
   }
 
@@ -1153,19 +1309,68 @@ export class OpenShellGitRuntime {
           throw error; // a failed read is not a finding about the retained authority
         }
       },
-      (outcome, check) =>
+      (outcome, check, failure) =>
         this.emit?.({
           event: "worker.openshell-git-expiry",
           ...revisionIdentity(revision),
           outcome,
           check,
+          ...(failure === undefined ? {} : { failure }),
         }),
     );
   }
 
+  /**
+   * Deletes the revision's Git provider and its profile (finding 2206). The Sandbox Driver calls
+   * this only after withdraw() and after OpenShell confirms the revision's Sandbox gone, so no
+   * route can use the provider again: in this process the entry is blocked, and adoption by any
+   * other worker finds neither the Sandbox nor the provider (the store's tombstone, written best
+   * effort, refuses it earlier). (Without a route store, which only the
+   * unprotected git-write path lacks, a restarted worker asked to prepare the revision again
+   * starts a new bootstrap with every admission check, as a first preparation does.) The name
+   * derives from the revision's own scope, as at preparation, so a restarted worker finds
+   * it too. `attached`, the Sandbox's provider list read before its deletion, names it when the
+   * scope no longer resolves (its grant or standing approval was withdrawn, often the reason the
+   * revision stopped) or derives another name (an upgrade changed the scope's inputs). A
+   * provider neither names (an earlier pass deleted the Sandbox, or the Sandbox detached it at
+   * expiry) is left to Namespace cleanup.
+   */
+  async removeProvider(
+    revision: Readonly<AgentRevision>,
+    client: OpenShellGatewayClient,
+    workspace: string,
+    sandbox: string,
+    attached: readonly string[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    let delivery: OpenShellPreparedGitDelivery | undefined;
+    try {
+      delivery = this.scope(revision).delivery;
+    } catch {
+      delivery = undefined;
+    }
+    if (delivery !== undefined) {
+      const current = await client.getWorkspace(workspace, signal);
+      if (current?.id) {
+        await gitProvider(client, workspace, current.id, sandbox, revision.id, delivery).remove(
+          signal,
+        );
+      }
+    }
+    // The derived provider is gone by now, so this finds only another prepared Git provider the
+    // Sandbox attached; deleteOpenShellPreparedGitProvider skips every provider that is not one.
+    for (const name of attached) {
+      const provider = await client.getProvider(workspace, name, signal);
+      if (provider !== undefined) {
+        await deleteOpenShellPreparedGitProvider(client, workspace, provider, signal);
+      }
+    }
+  }
+
   withdraw(revisionId: string): void {
     // Keep the tombstone to prevent adoption/recreation under the same execution identity,
-    // in this process and, through the store, in any later one.
+    // in this process and, through the store, in any later one. The entry itself is dropped
+    // once its Sandbox is gone; its reason stays.
     void this.entries.get(revisionId)?.then(
       (entry) => {
         entry.blocked ??= "withdrawn";
@@ -1173,7 +1378,7 @@ export class OpenShellGitRuntime {
       },
       () => {},
     );
-    void this.routes?.withdraw({ revisionId }).catch(() => {});
+    this.recordWithdrawal({ revisionId });
   }
 
   withdrawNamespace(namespaceId: string): void {
@@ -1188,7 +1393,20 @@ export class OpenShellGitRuntime {
         () => {},
       );
     }
-    void this.routes?.withdraw({ namespaceId }).catch(() => {});
+    this.recordWithdrawal({ namespaceId });
+  }
+
+  /** The store's tombstone keeps any other worker from adopting the routes; this process's
+   * own tombstone already refuses them, so a store that does not answer is reported only. */
+  private recordWithdrawal(selector: OpenShellGitRouteWithdrawal): void {
+    void this.routes?.withdraw(selector).catch((error: unknown) => {
+      this.emit?.({
+        event: "worker.error",
+        code: "OPENSHELL_GIT_WITHDRAWAL_UNRECORDED",
+        ...selector,
+        cause: error instanceof Error ? error.name : "unknown",
+      });
+    });
   }
 
   /**
@@ -1344,7 +1562,7 @@ export class OpenShellGitRuntime {
 
   /** Closes the route for good and reports why; the entry is a tombstone from here on, in
    * this process and, unless another worker holds the route now, in the store. */
-  private block(entry: Entry, reason: OpenShellGitRouteBlockReason): void {
+  private block(entry: Entry, reason: OpenShellGitRouteBlockReason, reported = false): void {
     if (entry.preview && entry.blocked) {
       return;
     }
@@ -1363,6 +1581,18 @@ export class OpenShellGitRuntime {
         this.entries.delete(entry.revision.id);
         this.states.delete(entry.revision.id);
       }
+      this.emit?.({
+        event: "worker.openshell-git-route-warning",
+        status: "closed",
+        reason,
+        ...this.identity(entry),
+      });
+      return;
+    }
+    if (reported) {
+      // Another worker closed the route in the store (withdrawal or expiry), and the row already
+      // says why. The entry stays, so the Agent is told access_withdrawn, until its Sandbox is
+      // gone (finding 2218).
       this.emit?.({
         event: "worker.openshell-git-route-warning",
         status: "closed",
@@ -1437,7 +1667,7 @@ export class OpenShellGitRuntime {
     }
     let failure: OpenShellGitObservationFailure | undefined;
     if (error instanceof OpenShellGitRouteError) {
-      this.block(entry, error.reason);
+      this.block(entry, error.reason, error instanceof OpenShellGitRouteClosedError);
       return;
     }
     if (error instanceof OpenShellPreparedGitProviderError) {
@@ -1484,6 +1714,7 @@ export class OpenShellGitRuntime {
   private async reconcile(entry: Entry): Promise<void> {
     if (entry.blocked) {
       await this.confirmPreviewClosure(entry);
+      await this.release(entry);
       return;
     }
     if (!entry.verify || !this.owner) {
@@ -1499,10 +1730,16 @@ export class OpenShellGitRuntime {
     if (entry.installed ? now < (entry.nextRefreshAt ?? 0) : now < (entry.nextObserveAt ?? 0)) {
       return;
     }
-    const signal = AbortSignal.any([this.stopped.signal, AbortSignal.timeout(OBSERVE_TIMEOUT_MS)]);
+    const signal = AbortSignal.any([
+      this.stopped.signal,
+      AbortSignal.timeout(this.observeTimeoutMs),
+    ]);
     try {
       // Another worker may have adopted the route meanwhile (finding 2128).
       await this.fenced(entry, signal);
+      if (entry.unsentWrite !== undefined) {
+        await this.cancelWriting(entry, signal);
+      }
       // Observe the bootstrap supervisor before delivering the first usable credential.
       const observed = await this.observation(entry, signal, { adopt: true, predecessor: true });
       if (!observed) {
@@ -1635,6 +1872,11 @@ export class OpenShellGitRuntime {
               signal,
             );
             if (!rotated) {
+              if (signal.aborted) {
+                // This pass ran out of time before the write (finding 2211): nothing was sent.
+                // The catch below clears the reservation; the route is observed again.
+                throw new OpenShellGitObservationError("timeout", signal.reason);
+              }
               // The writer never sent the selected material. Clear only our own write intent.
               this.pending(entry, "material_unavailable");
               await this.cancelWriting(entry, signal);
@@ -1685,6 +1927,66 @@ export class OpenShellGitRuntime {
     } catch (error) {
       this.failed(entry, error, signal);
     }
+  }
+
+  /**
+   * Drops a closed route whose Sandbox is gone (finding 2218): nothing can ask for it any more,
+   * so the tick and lookups stop walking it. Its reason stays in this process, which never
+   * prepares, adopts or verifies the revision again, and the store's tombstone refuses it to any
+   * other worker. A Sandbox still there, or a failed read, is read again later, backing off. A
+   * Sandbox the route never observed may still be in creation: it must read absent twice.
+   */
+  private async release(entry: Entry): Promise<void> {
+    const id = entry.revision.id;
+    const last = entry.release;
+    if (
+      entry.previewClosure !== undefined ||
+      this.states.get(id)?.entry !== entry ||
+      performance.now() < (last?.at ?? 0)
+    ) {
+      return;
+    }
+    const signal = AbortSignal.any([
+      this.stopped.signal,
+      AbortSignal.timeout(this.observeTimeoutMs),
+    ]);
+    // A read that fails for any reason keeps the entry. One the gateway refuses by this worker's
+    // identity keeps it until that changes, so it is reported, once per entry.
+    let refused = false;
+    const present = await read(async () => {
+      const { workspace, sandbox } = entry.binding;
+      return entry.client.getSandbox({ workspace, name: sandbox }, signal);
+    }, signal).then(
+      (box) => box !== undefined,
+      (error: unknown) => {
+        refused =
+          error instanceof OpenShellGitRouteError && error.reason === "gateway_unauthorized";
+        return true;
+      },
+    );
+    if (entry.blocked === undefined || this.states.get(id)?.entry !== entry) {
+      return;
+    }
+    if (!present && (entry.sandboxId !== undefined || last?.absent)) {
+      this.entries.delete(id);
+      this.states.set(id, { blocked: entry.blocked });
+      return;
+    }
+    if (refused && !last?.refused) {
+      this.emit?.({
+        event: "worker.openshell-git-route-warning",
+        status: "retained",
+        reason: "gateway_unauthorized",
+        ...this.identity(entry),
+      });
+    }
+    const reads = (last?.present ?? 0) + (present ? 1 : 0);
+    entry.release = {
+      at: performance.now() + Math.min(REFRESH_INTERVAL_MS * 2 ** reads, RELEASE_INTERVAL_CAP_MS),
+      present: reads,
+      ...(!present && { absent: true }),
+      ...((refused || last?.refused) && { refused: true }),
+    };
   }
 
   /**
@@ -1965,6 +2267,7 @@ export class OpenShellGitRuntime {
     this.owner = undefined;
     this.entries.clear();
     this.states.clear();
+    this.unsentBootstraps.clear();
   }
 }
 
