@@ -153,9 +153,10 @@ In `managed` mode the gateway owns every sandbox-side Kubernetes object: the
 namespace behind each Workspace, the sandbox ServiceAccount, and the workspace
 volume backing `/sandbox`. OCC reconciles the Workspace over the gateway RPC
 only, holds no sandbox-cluster kubeconfig, and rejects the operator workspace
-and Pod-infrastructure options. The sandbox spec sends only the workload, with
-no driver-config mount under `/sandbox`, and Harness workspace mounts are
-refused. See
+and Pod-infrastructure options. The sandbox spec sends only the workload and
+its containment policy — no caller driver config, labels, or annotations, which
+recent OpenShell gateways reject — and Harness workspace mounts are refused.
+See
 [Use an external OpenShell gateway](../../guides/deploy/external-openshell-gateway.md).
 
 The Kubernetes development profile acts as the operator for its disposable
