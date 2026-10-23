@@ -603,7 +603,6 @@ interface PluginRuntimeStatus {
 interface PrivateStatusReadback {
   readonly status: unknown;
   readonly podUid: string;
-  readonly podName: string;
   readonly containerId: string | undefined;
 }
 
@@ -6294,7 +6293,6 @@ export class KubernetesComputeDriver implements ComputeDriver {
         admittedRevision,
         await this.workspaceNodeDeviceId(admittedRevision, namespace),
         namespace,
-        await this.gatewayStateOriginUid(revision, gatewayNamespace),
       ),
     );
     let existingGatewayRevisionId: string | undefined;
@@ -7415,7 +7413,6 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const harnessAuth = this.harnessAuthForRevision(admittedRevision, context, sourceNamespace);
     const gatewayNamespace = await this.requireGatewayNamespace(revision, namespace);
     const nativeRuntime = nativeRuntimeSnapshot(admittedRevision);
-    const stateRecoveryStorageUid = await this.gatewayStateOriginUid(revision, gatewayNamespace);
     const agentName = `agent-${sha256Hex(revision.agentId, 12)}`;
     const gatewayName = `gateway-${sha256Hex(revision.agentId, 12)}`;
     const gatewayOwnership = { namespaceId: revision.namespaceId, agentId: revision.agentId };
@@ -7469,6 +7466,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
         currentRevisionId !== revision.id ||
         annotations[REPOSITORY_MATERIAL_GENERATION] !== repositoryMaterial?.generation
       ) {
+        // A rejected activation never reuses state. Invalidate any earlier
+        // private origin only when this embedded workload will replace it.
+        await this.gatewayStateOriginUid(revision, namespace);
         const deliveredHarnessAuth = await this.deliverHarnessAuth(
           admittedRevision,
           context,
@@ -7575,11 +7575,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     const revisionName = `${agentName}-rev-${sha256Hex(revision.id, 12)}`;
-    const configuration = this.gatewayConfiguration(
+    let configuration = this.gatewayConfiguration(
       admittedRevision,
       await this.workspaceNodeDeviceId(admittedRevision, namespace),
       namespace,
-      stateRecoveryStorageUid,
     );
     if (
       this.nodeEnrollment !== undefined &&
@@ -7742,6 +7741,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
       gatewayOwnership,
       namespace,
     );
+    // Enrollment and Harness readiness must succeed before this activation
+    // can reuse the Gateway's state under a different protection boundary.
+    const stateRecoveryStorageUid = await this.gatewayStateOriginUid(revision, gatewayNamespace);
+    if (stateRecoveryStorageUid !== undefined) {
+      configuration = { ...configuration, stateRecoveryStorageUid };
+    }
     await this.reconcile(
       this.gatewayPrivateStateClaim(revision.agentId, gatewayOwnership, gatewayNamespace),
       gatewayOwnership,
@@ -10472,7 +10477,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
       return undefined;
     }
     namespace = container === "gateway" ? this.gatewayNamespace(revision, namespace) : namespace;
-    return this.privateStatusReadbackAtNamespace(revision, namespace, container, path);
+    const readback = await this.privateStatusReadbackAtNamespace(
+      revision,
+      namespace,
+      container,
+      path,
+    );
+    return readback === undefined
+      ? undefined
+      : { status: readback.status, podUid: readback.podUid, containerId: readback.containerId };
   }
 
   private async privateStatusReadbackAtNamespace(
@@ -10480,7 +10493,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     namespace: KubernetesNamespaceAddress,
     container: "agent" | "gateway",
     path: string,
-  ): Promise<PrivateStatusReadback | undefined> {
+  ): Promise<(PrivateStatusReadback & { readonly podName: string }) | undefined> {
     const pods = (await this.revisionPods(revision, namespace, container)).filter(
       (pod) => asRecord(pod.metadata)?.deletionTimestamp === undefined,
     );

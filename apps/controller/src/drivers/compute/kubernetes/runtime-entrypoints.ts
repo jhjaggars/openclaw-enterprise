@@ -2312,7 +2312,6 @@ ${WORKSPACE_ASSET_HELPERS}
 ${OPENCLAW_AUTH_PROBE_HELPERS}
 ${startupPhaseHelper("gateway")}
 ${gatewayStateMigrationHelper("restart the Pod")}
-${NATIVE_GATEWAY_STATE_RECOVERY_RUNTIME}
 
 function nativeGatewayAnswers(path) {
   return new Promise((resolve) => {
@@ -2932,6 +2931,7 @@ function stopContainer() {
 let pluginResult;
 let peerStatus;
 let resetWorkspaceNodeTracking = () => {};
+${NATIVE_GATEWAY_STATE_RECOVERY_RUNTIME}
 (async () => {
 if (codexBridgeRecordProblem !== undefined) {
   holdCodexBridgeRecordFailure();
