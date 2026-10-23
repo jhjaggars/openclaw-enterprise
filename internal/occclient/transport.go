@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Config contains connection, authentication, and TLS settings for an OCC client.
@@ -32,13 +34,19 @@ type Config struct {
 type Client struct {
 	ctx        context.Context
 	baseURL    *url.URL
-	serviceKey string
+	serviceKey serviceKey
 	http       *http.Client
+}
+
+type serviceKey struct {
+	key       string
+	namespace string
 }
 
 type serviceKeyEnvelope struct {
 	Data struct {
-		Key string `json:"key"`
+		Key         string         `json:"key"`
+		NamespaceID jsontext.Value `json:"namespaceId"`
 	} `json:"data"`
 }
 
@@ -47,16 +55,27 @@ type responseEnvelope struct {
 	Meta jsontext.Value `json:"meta"`
 }
 
+// ConfigurationErrorDetail identifies a rejected configuration field without its value.
+type ConfigurationErrorDetail struct {
+	Path    string `json:"path"`
+	Code    string `json:"code"`
+	Message string `json:"message,omitempty"`
+}
+
 // APIError is an OCC error response. RetryAfter is set when OCC sent Retry-After.
 // Location is the absolute redirect target of a 3xx response, without userinfo,
 // query, or fragment; occ never follows redirects, so the service key is only
 // ever sent to the configured origin.
 type APIError struct {
+	Details    []ConfigurationErrorDetail
 	Status     int
 	Code       string
 	Message    string
 	RetryAfter time.Duration
 	Location   string
+	// ServiceKeyNamespace is local metadata recorded with the key for this request.
+	// It is not an assertion by the server or a source of authorization.
+	ServiceKeyNamespace string
 	// redirectOrigin is the Location's scheme://host when it differs from OCC_URL.
 	redirectOrigin string
 }
@@ -82,13 +101,32 @@ func (err *APIError) Error() string {
 		// OCC's rate-limit messages say to wait for Retry-After; name the delay.
 		message = fmt.Sprintf("%s. Retry after %ds.", strings.TrimSuffix(message, "."), int(math.Ceil(err.RetryAfter.Seconds())))
 	}
+	// Render only bounded public diagnostic fields. Reject all Unicode control characters,
+	// including DEL and C1 controls that JSON encoding does not escape.
+	for index, detail := range err.Details {
+		if index == 32 {
+			break
+		}
+		if strings.ContainsFunc(detail.Path, unicode.IsControl) || strings.ContainsFunc(detail.Message, unicode.IsControl) || strings.ContainsFunc(detail.Code, unicode.IsControl) {
+			continue
+		}
+		if utf8.RuneCountInString(detail.Path) > 512 || utf8.RuneCountInString(detail.Message) > 512 || len(detail.Code) > 64 {
+			continue
+		}
+		encoded, encodeErr := json.Marshal(detail)
+		if encodeErr == nil {
+			message += "\n  " + string(encoded)
+		}
+	}
+
 	return message
 }
 
 type errorEnvelope struct {
 	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code    string                     `json:"code"`
+		Message string                     `json:"message"`
+		Details []ConfigurationErrorDetail `json:"details,omitempty"`
 	} `json:"error"`
 }
 
@@ -150,7 +188,10 @@ func (client *Client) send(method string, segments []string, body any) (any, err
 	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		return nil, client.apiError(status, header, responseBody)
 	}
+	return decodeResponseData(status, responseBody)
+}
 
+func decodeResponseData(status int, responseBody []byte) (any, error) {
 	var envelope responseEnvelope
 	if err := json.Unmarshal(responseBody, &envelope); err != nil || len(envelope.Data) == 0 || len(envelope.Meta) == 0 {
 		return nil, fmt.Errorf("OCC returned an invalid response (HTTP %d)", status)
@@ -207,7 +248,7 @@ func (client *Client) executeQuery(
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("failed to create OCC request: %w", err)
 	}
-	request.Header.Set("x-api-key", client.serviceKey)
+	request.Header.Set("x-api-key", client.serviceKey.key)
 	if body != nil {
 		request.Header.Set("content-type", "application/json")
 	}
@@ -260,13 +301,14 @@ func resourceURL(baseURL *url.URL, segments []string) (*url.URL, error) {
 }
 
 func (client *Client) apiError(status int, header http.Header, body []byte) error {
-	result := &APIError{Status: status}
+	result := &APIError{Status: status, ServiceKeyNamespace: client.serviceKey.namespace}
 	var envelope errorEnvelope
 	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error.Code != "" {
 		result.Code = envelope.Error.Code
 		result.Message = envelope.Error.Message
+		result.Details = envelope.Error.Details
 	}
-	if seconds, err := strconv.Atoi(header.Get("retry-after")); err == nil && seconds > 0 && seconds <= 3600 {
+	if seconds, err := strconv.ParseUint(header.Get("retry-after"), 10, 64); err == nil && seconds > 0 && seconds <= 3600 {
 		result.RetryAfter = time.Duration(seconds) * time.Second
 	} else if until, err := http.ParseTime(header.Get("retry-after")); err == nil {
 		if remaining := time.Until(until); remaining > 0 && remaining <= time.Hour {
@@ -282,7 +324,7 @@ func (client *Client) apiError(status int, header http.Header, body []byte) erro
 			target.Fragment = ""
 			target.RawFragment = ""
 			result.Location = target.String()
-			if target.Scheme != client.baseURL.Scheme || target.Host != client.baseURL.Host {
+			if target.Scheme != client.baseURL.Scheme || !strings.EqualFold(target.Host, client.baseURL.Host) {
 				result.redirectOrigin = target.Scheme + "://" + target.Host
 			}
 		}
@@ -290,20 +332,23 @@ func (client *Client) apiError(status int, header http.Header, body []byte) erro
 	return result
 }
 
-func readServiceKey(path string) (string, error) {
+func readServiceKey(path string) (serviceKey, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to read service-key file %s: %w", path, err)
+		return serviceKey{}, fmt.Errorf("failed to read service-key file %s: %w", path, err)
 	}
 	var envelope serviceKeyEnvelope
 	if err := json.Unmarshal(contents, &envelope); err != nil {
-		return "", fmt.Errorf("invalid service-key file %s: %w", path, err)
+		return serviceKey{}, fmt.Errorf("invalid service-key file %s: %w", path, err)
 	}
 	key := envelope.Data.Key
 	if strings.TrimSpace(key) == "" || strings.ContainsAny(key, "\r\n") {
-		return "", fmt.Errorf("invalid service-key file %s", path)
+		return serviceKey{}, fmt.Errorf("invalid service-key file %s", path)
 	}
-	return key, nil
+	// Optional display metadata must not make an otherwise usable key unreadable.
+	var namespace string
+	_ = json.Unmarshal(envelope.Data.NamespaceID, &namespace)
+	return serviceKey{key: key, namespace: namespace}, nil
 }
 
 func httpTransport(caBundle string) (*http.Transport, error) {

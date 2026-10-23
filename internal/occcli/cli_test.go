@@ -53,10 +53,7 @@ func TestResourceRequestStopsWhenCommandContextIsCanceled(t *testing.T) {
 			defer server.Close()
 			defer close(release)
 
-			keyFile := filepath.Join(t.TempDir(), "service-key.json")
-			if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -279,10 +276,7 @@ func runLogsCommandTo(t *testing.T, ctx context.Context, stub *runtimeLogStub, o
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(stub.serve))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	command := New(out, errOut)
 	command.SetArgs(append(args, "--url", server.URL, "--service-key-file", keyFile, "--namespace", "ns_1"))
 	return command.ExecuteContext(ctx)
@@ -400,6 +394,7 @@ func TestAgentLogsRejectsInvalidFlagsBeforeAnyRequest(t *testing.T) {
 		}
 	}
 	// --follow exits cleanly only when the lookup failed because of cancellation.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
 	for _, follow := range []bool{false, true} {
 		args := []string{"agent", "logs", "agt_1", "--source", "gateway"}
 		if follow {
@@ -407,7 +402,8 @@ func TestAgentLogsRejectsInvalidFlagsBeforeAnyRequest(t *testing.T) {
 		}
 		stub := &runtimeLogStub{t: t}
 		_, _, err := runLogsCommand(t, context.Background(), stub, args...)
-		if err == nil || !strings.Contains(err.Error(), "has no readable revisions") {
+		// The hint keeps the selected Namespace so the copied command targets the same Agent.
+		if err == nil || !strings.Contains(err.Error(), `agent agt_1 has no readable revisions; run "occ --namespace ns_1 agent deploy agt_1" first`) {
 			t.Fatalf("follow=%v: expected a missing revision error, got %v", follow, err)
 		}
 		if len(stub.queries) != 0 {
@@ -431,7 +427,8 @@ func TestAgentRuntimeAndLogsDefaultToLatestRevisionWithoutActiveRevision(t *test
 	if !strings.Contains(out, "startup failed") {
 		t.Fatalf("logs output = %q", out)
 	}
-	if !strings.Contains(errOut, "has no active revision; using latest revision rev_2") {
+	// Every CLI notice carries the notice: prefix (D610).
+	if !strings.HasPrefix(errOut, "notice: agent agt_1 has no active revision; using latest revision rev_2\n") {
 		t.Fatalf("logs notice = %q", errOut)
 	}
 	_, runtimeErr, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1")
@@ -521,6 +518,83 @@ func TestAgentLogsDefaultToANewerRevisionWithPodsAndNameTheRevision(t *testing.T
 	}
 }
 
+// Revision lists are permission-filtered, so the only other readable revision
+// can be older than the active one. A refused runtime probe must name its order
+// only when the active revision's metadata proves it, never assume "newer" (D607).
+func TestAgentLogsNameTheOrderOfAnUnprobedOtherRevision(t *testing.T) {
+	for _, test := range []struct{ name, metadata, other string }{
+		{"older", `{"id":"rev_2","revision":2}`, "an older revision rev_1"},
+		{"active metadata refused", "forbidden", "another readable revision rev_1"},
+		{"active number missing", `{"id":"rev_2"}`, "another readable revision rev_1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &runtimeLogStub{t: t, activeID: "rev_2", activeRevision: test.metadata, revisions: `[{"id":"rev_1","revision":1}]`, forbidden: []string{"rev_1"}, pages: []func(http.ResponseWriter, url.Values){
+				logPage("", logLine(1, "info", "ready")),
+			}}
+			_, errOut, err := runLogsCommand(t, context.Background(), stub, "agent", "logs", "agt_1", "--source", "gateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "notice: reading the active revision rev_2; " + test.other + " exists but its runtime could not be read"
+			if !strings.Contains(errOut, want) || strings.Contains(errOut, "newer") {
+				t.Fatalf("notice = %q, want %q", errOut, want)
+			}
+			if got := stub.paths[len(stub.paths)-1]; got != "/namespaces/ns_1/agents/agt_1/deployments/rev_2/runtime/logs" {
+				t.Fatalf("final request = %s", got)
+			}
+		})
+	}
+}
+
+// Keep a Pod-bearing candidate when its order is unknown, so a member can
+// inspect a failed replacement without read permission on active metadata.
+func TestAgentLogsNameTheOrderOfAnOtherRevisionWithPods(t *testing.T) {
+	for _, test := range []struct{ name, metadata, notice string }{
+		{"active metadata refused", "forbidden", "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+		{"active number missing", `{"id":"rev_2"}`, "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+		{"active identity mismatched", `{"id":"rev_other","revision":2}`, "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &runtimeLogStub{t: t, activeID: "rev_2", activeRevision: test.metadata, revisions: `[{"id":"rev_1","revision":1}]`, pages: []func(http.ResponseWriter, url.Values){
+				logPage("", logLine(1, "info", "ready")),
+			}}
+			_, errOut, err := runLogsCommand(t, context.Background(), stub, "agent", "logs", "agt_1", "--source", "gateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if errOut != test.notice+"\n" {
+				t.Fatalf("notice = %q, want %q", errOut, test.notice)
+			}
+			if got := stub.paths[len(stub.paths)-1]; got != "/namespaces/ns_1/agents/agt_1/deployments/rev_1/runtime/logs" {
+				t.Fatalf("final request = %s", got)
+			}
+		})
+	}
+}
+
+// Selection reads the active revision's metadata once, and the notice uses that
+// same observation: a second read that failed would misname a Podless Harness
+// revision as "another readable revision that still has Pods".
+func TestAgentRuntimeNamesHarnessSelectionFromOneMetadataRead(t *testing.T) {
+	stub := &runtimeLogStub{t: t, activeID: "rev_1", revisions: `[{"id":"rev_2","revision":2},{"id":"rev_1","revision":1}]`, podless: []string{"rev_2"}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
+	_, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "notice: reading revision rev_2, newer than the active revision rev_1 and not yet active; pass --revision rev_1 for the active revision\n"; notices != want {
+		t.Fatalf("notice = %q, want %q", notices, want)
+	}
+	reads := 0
+	for _, path := range stub.paths {
+		if path == "/namespaces/ns_1/agents/agt_1/revisions/rev_1" {
+			reads++
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("active revision metadata read %d times, want 1 (requests %v)", reads, stub.paths)
+	}
+}
+
 func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
 	for _, state := range []string{"running", "starting", "lost", "unknown"} {
 		for _, action := range []string{"runtime", "logs"} {
@@ -573,19 +647,20 @@ func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
 	}
 }
 
-func TestAgentRuntimeRetainsActiveWhenPodlessCandidateIsNotProvablyNewer(t *testing.T) {
-	for _, test := range []struct{ name, activeID, revisions, metadata string }{
-		{"older-only readable list", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`},
-		{"active metadata denied", "rev_1", `[{"id":"rev_2","revision":2}]`, "forbidden"},
-		{"active number missing", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_1"}`},
-		{"active identity mismatched", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`},
+func TestAgentRuntimeRetainsActiveWhenCandidateIsNotProvablyNewer(t *testing.T) {
+	for _, test := range []struct {
+		name, activeID, revisions, metadata string
+		podless                             []string
+	}{
+		{"older-only readable list/podless=true", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`, []string{"rev_1"}},
+		// Pod candidates retain the active revision only when proven older.
+		{"older-only readable list/podless=false", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`, nil},
+		{"active metadata denied/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, "forbidden", []string{"rev_2"}},
+		{"active number missing/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_1"}`, []string{"rev_2"}},
+		{"active identity mismatched/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`, []string{"rev_2"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			candidate := "rev_2"
-			if test.activeID == "rev_2" {
-				candidate = "rev_1"
-			}
-			stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: []string{candidate}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
+			stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: test.podless, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
 			out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
 			if err != nil {
 				t.Fatal(err)
@@ -599,6 +674,25 @@ func TestAgentRuntimeRetainsActiveWhenPodlessCandidateIsNotProvablyNewer(t *test
 				t.Fatalf("notice=%q", notices)
 			}
 		})
+	}
+}
+
+// A readable older revision can retain Pods while the active revision is hidden
+// from revision lists. Log selection must retain the active revision as well.
+func TestAgentLogsRetainActiveWhenOnlyOlderRevisionHasPods(t *testing.T) {
+	page := func(response http.ResponseWriter, _ url.Values) {
+		fmt.Fprint(response, `{"data":{"revisionId":"rev_2","source":"gateway","stream":{"source":"gateway","pod":"gw-0","container":"gateway","restartCount":0},"observedAt":"2026-09-30T12:00:00.000Z","records":[{"type":"line","time":"2026-09-30T12:00:00Z","stream":{"source":"gateway","pod":"gw-0","container":"gateway","restartCount":0},"contentClass":"operational","kind":"openclaw","level":"info","message":"active revision output"}],"withheld":0,"truncated":false,"cursor":null},"meta":{}}`)
+	}
+	stub := &runtimeLogStub{t: t, activeID: "rev_2", activeRevision: `{"id":"rev_2","revision":2}`, revisions: `[{"id":"rev_1","revision":1}]`, pages: []func(http.ResponseWriter, url.Values){page}}
+	out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "logs", "agt_1", "--source", "gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "active revision output") || !strings.Contains(notices, "reading the active revision rev_2") {
+		t.Fatalf("output=%q notices=%q", out, notices)
+	}
+	if got := stub.paths[len(stub.paths)-1]; got != "/namespaces/ns_1/agents/agt_1/deployments/rev_2/runtime/logs" {
+		t.Fatalf("final request=%s", got)
 	}
 }
 
@@ -786,7 +880,7 @@ func TestAgentRuntimePrintsALostHarnessSandboxFirst(t *testing.T) {
 		// A crash-looping Harness is told apart from a first start (finding 1043).
 		{
 			map[string]any{"state": "starting", "code": "HARNESS_RESTARTING", "exitCode": float64(1), "restarts": float64(3)},
-			"Harness Sandbox: starting (HARNESS_RESTARTING, last exit code 1, restart 3). The Harness process exited and OpenShell is restarting it; if this persists, read its Sandbox logs (occ agent logs AGENT_ID --source sandbox).\n\n",
+			"Harness Sandbox: starting (HARNESS_RESTARTING, last exit code 1, restart 3). The Harness process exited and OpenShell is restarting it; if this persists, read its Sandbox logs (occ --namespace ns_1 agent logs agt_1 --source sandbox --revision rev_1).\n\n",
 		},
 		{
 			map[string]any{"state": "starting", "code": "HARNESS_RESTARTING", "exitCode": float64(-1), "restarts": float64(1)},
@@ -811,7 +905,7 @@ func TestAgentRuntimePrintsALostHarnessSandboxFirst(t *testing.T) {
 		if test.harness != nil {
 			description["harness"] = test.harness
 		}
-		if err := app.printRuntime(description); err != nil {
+		if err := app.printRuntime(description, "ns_1", "agt_1", "rev_1"); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.HasPrefix(out.String(), test.want) {
@@ -820,7 +914,31 @@ func TestAgentRuntimePrintsALostHarnessSandboxFirst(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeNamesTheExactSandboxLogsCommandForARestartingHarness(t *testing.T) {
+	// A stale environment scope must not replace the explicitly selected Namespace in the hint.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
+	restarting := map[string]any{"state": "starting", "code": "HARNESS_RESTARTING", "exitCode": float64(1), "restarts": float64(2)}
+	for _, args := range [][]string{
+		{"agent", "runtime", "agt_1", "--revision", "rev_2"},
+		// The default selection reads the newer revision, so the hint pins it.
+		{"agent", "runtime", "agt_1"},
+	} {
+		stub := &runtimeLogStub{t: t, activeID: "rev_1", revisions: `[{"id":"rev_2","revision":2},{"id":"rev_1","revision":1}]`, podless: []string{"rev_2"}, harness: restarting}
+		out, _, err := runLogsCommand(t, context.Background(), stub, args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		want := "Harness Sandbox: starting (HARNESS_RESTARTING, last exit code 1, restart 2). The Harness process exited and OpenShell is restarting it; " +
+			"if this persists, read its Sandbox logs (occ --namespace ns_1 agent logs agt_1 --source sandbox --revision rev_2).\n\n"
+		if !strings.HasPrefix(out, want) {
+			t.Errorf("%v: output = %q, want prefix %q", args, out, want)
+		}
+	}
+}
+
 func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
+	// A stale environment scope must not replace the explicitly selected Namespace in the hint.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
@@ -828,10 +946,7 @@ func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":{"id":"agt_1","name":"stopped-agent","namespaceId":"ns_1","desiredRuntimeState":"stopped"},"meta":{"requestId":"req_1"}}`)
 	}))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	var out, errOut strings.Builder
 	command := New(&out, &errOut)
 	command.SetArgs([]string{"agent", "stop", "agt_1", "--url", server.URL, "--service-key-file", keyFile, "--namespace", "ns_1"})
@@ -844,7 +959,7 @@ func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
 	if !strings.Contains(out.String(), "stopped-agent") {
 		t.Fatalf("stdout = %q", out.String())
 	}
-	if want := "notice: stop requested; run \"occ agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
+	if want := "notice: stop requested; run \"occ --namespace ns_1 agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
 		t.Fatalf("stderr = %q, want %q", errOut.String(), want)
 	}
 	// Structured output stays machine-readable: the notice goes to stderr only.
@@ -859,7 +974,7 @@ func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.String()), &decoded); err != nil || decoded["id"] != "agt_1" {
 		t.Fatalf("json stdout = %q, %v", out.String(), err)
 	}
-	if want := "notice: stop requested; run \"occ agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
+	if want := "notice: stop requested; run \"occ --namespace ns_1 agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
 		t.Fatalf("json stderr = %q, want %q", errOut.String(), want)
 	}
 	stop, _, err := New(io.Discard, io.Discard).Find([]string{"agent", "stop"})
@@ -883,10 +998,7 @@ func TestCredentialSourceListTableOmitsTheLiveGatewayStatusOnlyGetCarries(t *tes
 		}
 	}))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	for _, test := range []struct {
 		args []string
 		rows [][]string
@@ -921,6 +1033,7 @@ func TestRedirectIsReportedWithItsTargetAndNotFollowed(t *testing.T) {
 		name     string
 		location string
 		want     string
+		hostCase bool
 	}{
 		{
 			name:     "other origin",
@@ -928,21 +1041,27 @@ func TestRedirectIsReportedWithItsTargetAndNotFollowed(t *testing.T) {
 			want:     "redirected to https://" + strings.TrimPrefix(target.URL, "http://") + "/installation; occ does not follow redirects, so set OCC_URL (or --url) to https://" + strings.TrimPrefix(target.URL, "http://") + " ",
 		},
 		{name: "same origin", location: "/elsewhere/installation", want: "/elsewhere/installation; occ does not follow redirects, and OCC_URL must be the origin that serves the OCC API directly"},
+		{name: "same origin host case", hostCase: true, want: "/elsewhere/installation; occ does not follow redirects, and OCC_URL must be the origin that serves the OCC API directly"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var sawKey string
 			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				sawKey = r.Header.Get("x-api-key")
-				w.Header().Set("location", testCase.location)
+				location := testCase.location
+				if testCase.hostCase {
+					location = "http://" + strings.ToLower(r.Host) + "/elsewhere/installation"
+				}
+				w.Header().Set("location", location)
 				w.WriteHeader(http.StatusPermanentRedirect)
 			}))
 			defer origin.Close()
-			keyFile := filepath.Join(t.TempDir(), "service-key.json")
-			if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 			command := New(io.Discard, io.Discard)
-			command.SetArgs([]string{"installation", "get", "--url", origin.URL, "--service-key-file", keyFile})
+			originURL := origin.URL
+			if testCase.hostCase {
+				originURL = strings.Replace(originURL, "127.0.0.1", "LOCALHOST", 1)
+			}
+			command.SetArgs([]string{"installation", "get", "--url", originURL, "--service-key-file", keyFile})
 			err := command.Execute()
 			if err == nil {
 				t.Fatal("expected the redirect to fail the command")
@@ -1060,5 +1179,37 @@ func TestExplicitEmptyFlagValuesAreRefusedBeforeAnyWork(t *testing.T) {
 	command.SetArgs(append(slices.Clone(connection), "agent", "runtime", "agt_1", "--revision", "rev_1", "--ca-bundle="))
 	if err := command.Execute(); err == nil || requests != 1 {
 		t.Fatalf("--ca-bundle=: error = %v after %d requests, want the server's error after 1", err, requests)
+	}
+}
+
+// The real client must retain policy diagnostics through the ordinary CLI error path.
+func TestPolicyUpdatePrintsConfigurationDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.Path != "/namespaces/"+testNamespaceID+"/agents/"+testAgentID+"/sandbox-policy/networking" {
+			t.Errorf("unexpected policy request: %s %s", request.Method, request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusConflict)
+		fmt.Fprint(writer, `{"error":{"code":"RESOURCE_CONFLICT","message":"The requested network policy exceeds the Installation delegation ceiling.","details":[{"path":"/additions/0","code":"OUTSIDE_CEILING","message":"The grant exceeds the Installation delegation ceiling."},{"path":"/additions/1","code":"INVALID_VALUE","message":"invalid \u001b[31mvalue","providerPayload":"must-not-print"},{"path":"/additions/2","code":"INVALID_VALUE","message":"invalid \u007fvalue"},{"path":"/additions/3","code":"INVALID_VALUE","message":"invalid \u009bvalue"}]},"meta":{}}`)
+	}))
+	defer server.Close()
+	key := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
+	file := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(file, []byte(`{"expectedVersion":1,"additions":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := New(io.Discard, io.Discard)
+	command.SetArgs([]string{"--url", server.URL, "--service-key-file", key, "--namespace", testNamespaceID, "agent", "policy", "update", testAgentID, "--file", file})
+	err := command.Execute()
+	if err == nil {
+		t.Fatal("policy rejection was not returned")
+	}
+	for _, want := range []string{"The requested network policy exceeds the Installation delegation ceiling.", `"path":"/additions/0"`, `"code":"OUTSIDE_CEILING"`, `"message":"The grant exceeds the Installation delegation ceiling."`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing diagnostic %q in %s", want, err)
+		}
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x7f\u009b") || strings.Contains(err.Error(), "/additions/1") || strings.Contains(err.Error(), "/additions/2") || strings.Contains(err.Error(), "/additions/3") || strings.Contains(err.Error(), "providerPayload") || strings.Contains(err.Error(), "must-not-print") {
+		t.Fatalf("unsafe error fields were printed: %q", err.Error())
 	}
 }

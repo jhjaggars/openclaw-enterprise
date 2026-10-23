@@ -14,9 +14,11 @@ function clientCredentialSource(
     namespaceId: source.namespaceId,
     name: source.name,
     type: source.type,
+    ownerCapability: source.ownerCapability,
     config: source.config,
     secrets: source.secrets,
     state: source.state,
+    ...(source.egress === undefined ? {} : { egress: source.egress }),
     ref: source.ref,
     ...(source.status === undefined ? {} : { status: source.status }),
   };
@@ -91,22 +93,27 @@ export const credentialSourceHandlers = {
   }) {
     const credentialSourceId = params.credentialSourceId as string;
     const resource = { kind: "credential_source" as const, id: credentialSourceId, namespaceId };
-    // The update records its replacement Secrets before the gateway write, so the core runs its
-    // own transactions and commits the success audit with the new references. The gateway write
-    // cannot roll back, so a failed request after it still records a failure.
-    const updated = await controller.updateCredentialSource(
-      context.actorId,
-      {
-        namespaceId,
-        credentialSourceId,
-        ...(body?.secrets === undefined
-          ? {}
-          : { secrets: body.secrets as Record<string, SecretReference> }),
-      },
-      () => mutationEvent(resource),
-      (reasonCode) => mutationEvent(resource, undefined, undefined, { reasonCode }),
-    );
-    reply.send({ data: clientCredentialSource(updated), meta: { requestId: request.id } });
+    // The gateway write cannot roll back, so a failed request after it still records a failure.
+    const source = await controller.transact(async (unit) => {
+      const updated = await controller.updateCredentialSource(
+        context.actorId,
+        {
+          namespaceId,
+          credentialSourceId,
+          ...(body?.adoption === undefined ? {} : { adoption: body.adoption as "live" }),
+          ...(body?.authorityScope === undefined
+            ? {}
+            : { authorityScope: body.authorityScope as "execution" }),
+          ...(body?.secrets === undefined
+            ? {}
+            : { secrets: body.secrets as Record<string, SecretReference> }),
+        },
+        (reasonCode) => mutationEvent(resource, undefined, undefined, { reasonCode }),
+      );
+      await unit.audit.append(mutationEvent(resource));
+      return clientCredentialSource(updated);
+    });
+    reply.send({ data: source, meta: { requestId: request.id } });
   },
   async rotateCredentialSource({
     controller,

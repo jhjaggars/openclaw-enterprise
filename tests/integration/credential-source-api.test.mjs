@@ -192,6 +192,7 @@ async function fixture(
         type,
         config: { base_url: baseUrl },
         secrets: { api_key: secret.ref },
+        ownerCapability: "credential_gateway",
         driverId: driver.id,
         state: "registering",
         createdAt: new Date(now - 71_000).toISOString(),
@@ -237,6 +238,7 @@ async function fixture(
         config: type === "openai" ? config : toolConfig(type, config),
         secrets:
           type === "openai" ? { api_key: secret.ref } : { [SECRET_FIELD[type]]: toolSecret.ref },
+        ownerCapability: "credential_gateway",
         driverId: driver.id,
         state: "ready",
         createdAt: new Date().toISOString(),
@@ -267,6 +269,40 @@ async function fixture(
     },
   };
 }
+
+test("Installation discovery serializes OpenShell model authentication and refresh source metadata", async (t) => {
+  const f = await fixture(t, { toolSources: true });
+  // The real Driver advertises model login and OAuth2 refresh sources. The Installation
+  // response must carry that catalog through Fastify serialization for Console discovery.
+  const response = await f.request("GET", "/installation");
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  const types = response.data.capabilities.credentialSources.types;
+  assert.deepEqual(
+    types
+      .filter(({ harnessAuth }) => harnessAuth)
+      .map(({ type, harnessAuth }) => ({
+        type,
+        ...harnessAuth,
+      })),
+    [
+      { type: "codex-oauth", modelProvider: "openai", loginMode: "chatgptAuthTokens" },
+      { type: "openai", modelProvider: "openai", loginMode: "api_key" },
+      { type: "codex-pat", modelProvider: "openai", loginMode: "codex_pat" },
+    ],
+  );
+  assert.deepEqual(types.find(({ type }) => type === "codex-oauth")?.deviceAuthorization, {
+    harnessId: "codex",
+  });
+  for (const type of OAUTH2_TYPES) {
+    assert.equal(types.find((entry) => entry.type === type)?.rotation, "refresh", type);
+  }
+  const refreshToken = types
+    .find(({ type }) => type === "oauth2-refresh-token")
+    ?.secrets.find(({ name }) => name === "refresh_token");
+  assert.equal(refreshToken?.required, true);
+  assert.equal(refreshToken?.issuerRotated, true);
+  assert.deepEqual(f.mutations, []);
+});
 
 test("credential source HTTP admission rejects invalid endpoints without retaining records", async (t) => {
   const f = await fixture(t);

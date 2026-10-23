@@ -190,13 +190,7 @@ function createTestCredentialRefresh(calls, options = {}) {
 }
 
 function createTestSandbox() {
-  const configuredLoginModes = [];
   return {
-    configuredLoginModes,
-    configureAgent(configuration, _harness, loginMode) {
-      configuredLoginModes.push(loginMode);
-      return configuration;
-    },
     id: "sandbox-test",
     capability: "sandbox",
     implementation: "test-sandbox",
@@ -328,7 +322,6 @@ async function fixture(options = {}) {
       return { ...namespace, name: `placed-${namespace.id.slice(-12)}` };
     },
   };
-  const sandbox = createTestSandbox();
   const drivers = [
     iam,
     compute,
@@ -336,7 +329,7 @@ async function fixture(options = {}) {
     secretDriver,
     ...(options.withoutGateway ? [] : [gateway]),
     ...(options.withoutRefresh || options.withoutGateway ? [] : [refresh]),
-    ...(options.withoutSandbox ? [] : [sandbox]),
+    ...(options.withoutSandbox ? [] : [createTestSandbox()]),
   ];
   for (const driver of drivers) {
     controller.registerDriver(driver);
@@ -410,7 +403,6 @@ async function fixture(options = {}) {
     passRegistrationFence,
     refresh,
     secretDriver,
-    sandbox,
     state,
   };
 }
@@ -2078,7 +2070,9 @@ test("withdrawal is recorded for the active revision and queued once, and the re
     (error) =>
       error instanceof ResourceConflictError &&
       error.name === "ResourceStateConflictError" &&
-      error.message.startsWith("An Agent, active revision, or pending deployment"),
+      error.message.startsWith(
+        "An Agent, active revision, pending deployment, or provisioning request",
+      ),
   );
 
   // A later deployment's pending withdrawal with no attempt outstanding, as exhausted attempts
@@ -2243,7 +2237,6 @@ test("deploy admission freezes the source and requires the Agent principal to op
     controller,
     dedicatedAgent,
     gateway,
-    sandbox,
     grantAgentSourceOperate,
     makeReady,
     modelSecret,
@@ -2275,8 +2268,6 @@ test("deploy admission freezes the source and requires the Agent principal to op
   await assert.rejects(deploy(), AuthorizationDeniedError);
   grantAgentSourceOperate(agent, source);
   const revision = await deploy();
-  // The Sandbox selects isolation from admitted catalog metadata, never Secret material.
-  assert.equal(sandbox.configuredLoginModes.at(-1), "api_key");
   assert.deepEqual(revision.harnessAuth, {
     method: "credential_source",
     sourceId: source.id,
@@ -2492,6 +2483,7 @@ test("binding without a Credential Gateway is a 409 after operate, whether or no
       type: "registry",
       config: { host: "registry.example.com" },
       secrets: {},
+      ownerCapability: "credential_gateway",
       driverId: "credential-gateway-test",
       state: "ready",
       createdAt: "2026-09-27T12:00:00.000Z",
@@ -3555,6 +3547,7 @@ test("after a Credential Gateway change, every path refuses an old source with o
       type: "registry",
       config: { host: "registry-stuck.example.com" },
       secrets: {},
+      ownerCapability: "credential_gateway",
       driverId: gateway.id,
       state: "deleting",
       createdAt: "2026-09-27T12:00:00.000Z",
@@ -3662,6 +3655,7 @@ test("update and delete without a Credential Gateway are a 409 after the grant, 
       type: "registry",
       config: { host: "registry.example.com" },
       secrets: {},
+      ownerCapability: "credential_gateway",
       driverId: "credential-gateway-test",
       state: "ready",
       createdAt: "2026-09-27T12:00:00.000Z",

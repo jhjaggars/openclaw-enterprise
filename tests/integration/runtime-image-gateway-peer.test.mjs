@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { imageSmokeTimeoutMultiplier } from "../helpers/image-smoke-timeout.mjs";
+import { temporaryDirectory } from "../helpers/temporary-directory.mjs";
 import { runWritableGatewayRestart } from "../fixtures/runtime-gateway-writable-restart.mjs";
 import {
   GATEWAY_RUNTIME_ENTRYPOINT as KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
@@ -25,6 +25,11 @@ import {
 // during a peer status outage or a replacement peer changes. Split from
 // runtime-image-startup.test.mjs by measured case durations.
 
+// No Gateway cron. Cron work in flight at the peer change (drain counts rootRequests=1
+// cronRuns=1, no agent run) kept the old process draining past the fixture's 240 s, short of
+// the wrapper's 330 s SIGKILL (finding 1875). These cases cover peer recovery, not cron.
+const SKIP_GATEWAY_CRON = "OPENCLAW_SKIP_CRON=1";
+
 for (const writableConfig of [false, true]) {
   test(
     writableConfig
@@ -35,8 +40,7 @@ for (const writableConfig of [false, true]) {
       // A dedicated Codex Gateway with a plugin selection follows its Harness
       // peer status and holds a workspace node binding, as after a first deploy.
       const workspaceNodeId = randomBytes(32).toString("hex");
-      const directory = await mkdtemp(join(tmpdir(), "oce-runtime-image-config-"));
-      t.after(() => rm(directory, { recursive: true, force: true }));
+      const directory = await temporaryDirectory(t, "oce-runtime-image-config-");
       const configurationPath = join(directory, "openclaw.json");
       await writeFile(
         configurationPath,
@@ -75,6 +79,7 @@ for (const writableConfig of [false, true]) {
         extraEnvironment: [
           // This isolated fixture uses synthetic credentials; retain startup causes.
           "OPENCLAW_DEBUG=1",
+          SKIP_GATEWAY_CRON,
           "APP_SERVER_URL=ws://[::1]:4500",
           `OPENCLAW_PLUGIN_RUNTIME_JSON=${JSON.stringify({ manifest })}`,
           "OPENCLAW_PLUGIN_STATUS_CONTAINER=gateway",
@@ -115,6 +120,28 @@ for (const writableConfig of [false, true]) {
         const logs = await runDocker(["logs", containerName]).catch((logsError) => logsError);
         // CI truncates error messages; preserve complete container logs separately.
         t.diagnostic(commandOutput(logs));
+        // CI also keeps only 1,000 characters of each output line, which the log above spends
+        // on the Gateway's first lines. Each wrapper phase and each stream's last lines get a
+        // line of their own, so a peer change with no respawn shows where the wrapper stopped
+        // (finding 1875).
+        for (const entry of jsonLogEntries(commandOutput(logs))) {
+          if (entry?.event === "runtime.startup_phase") {
+            t.diagnostic(
+              `wrapper phase at failure: ${entry.phase}:${entry.outcome}${entry.code ? ` ${entry.code}` : ""} ${entry.ms}/${entry.sinceStartMs} ms (duration/since start)`,
+            );
+          }
+        }
+        // Its own read: a log over runDocker's 1 MB buffer would keep only its beginning.
+        const tail = await runDocker(["logs", "--tail", "20", containerName]).catch(
+          (tailError) => tailError,
+        );
+        for (const stream of ["stdout", "stderr"]) {
+          for (const line of String(tail[stream] ?? "").split("\n")) {
+            if (line.trim() !== "") {
+              t.diagnostic(`container ${stream} tail: ${line}`);
+            }
+          }
+        }
         const runtimeErrors = jsonLogEntries(commandOutput(logs))
           .filter((entry) => entry.level === "error")
           .map((entry) => entry.message)
@@ -165,8 +192,7 @@ test(
 );
 
 async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) {
-  const directory = await mkdtemp(join(tmpdir(), "oce-runtime-image-config-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await temporaryDirectory(t, "oce-runtime-image-config-");
   const configurationPath = join(directory, "openclaw.json");
   await writeFile(
     configurationPath,
@@ -186,6 +212,7 @@ async function assertGatewayExitsDuringPeerScenario(t, scenario, expectedPhase) 
     entrypoint: KUBERNETES_GATEWAY_RUNTIME_ENTRYPOINT,
     volumes: [`${configurationPath}:/etc/openclaw/openclaw.json:ro`],
     extraEnvironment: [
+      SKIP_GATEWAY_CRON,
       "APP_SERVER_URL=ws://[::1]:4500",
       `OPENCLAW_PLUGIN_RUNTIME_JSON=${JSON.stringify({ manifest })}`,
       "OPENCLAW_PLUGIN_STATUS_CONTAINER=gateway",

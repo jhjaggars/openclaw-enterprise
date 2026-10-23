@@ -7,6 +7,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
+import {
+  firstAgentPriorPatPolicy,
+  firstAgentPriorPatPolicyWarning,
+  firstAgentRevisionValuesMatch,
+} from "../../scripts/first-agent-model.mjs";
+import { listen } from "../helpers/listen.mjs";
+import { commandPath, writeCommand } from "../helpers/fake-commands.mjs";
+
 const repository = await realpath(resolve(import.meta.dirname, "../.."));
 const firstAgent = join(repository, "scripts", "first-agent.mjs");
 
@@ -17,10 +25,10 @@ async function fixture(t, sandboxDriver) {
   const keyPath = join(directory, "initial-admin-service-key.json");
   await mkdir(tools, { mode: 0o700 });
   await Promise.all([
-    writeFile(
-      join(tools, "docker"),
-      '#!/bin/sh\nprintf "%s\\n" "$*" "DOCKER_HOST=$DOCKER_HOST" "DOCKER_TLS=${DOCKER_TLS-unset}" "DOCKER_TLS_VERIFY=${DOCKER_TLS_VERIFY-unset}" "DOCKER_CERT_PATH=${DOCKER_CERT_PATH-unset}" > "$FIRST_AGENT_TEST_ENGINE_LOG"\nprintf "controller container is unavailable\\033[31m\\n" >&2\nprintf "%9000s" "" >&2\nexit 23\n',
-      { mode: 0o700 },
+    writeCommand(
+      tools,
+      "docker",
+      'printf "%s\\n" "$*" "DOCKER_HOST=$DOCKER_HOST" "DOCKER_TLS=${DOCKER_TLS-unset}" "DOCKER_TLS_VERIFY=${DOCKER_TLS_VERIFY-unset}" "DOCKER_CERT_PATH=${DOCKER_CERT_PATH-unset}" > "$FIRST_AGENT_TEST_ENGINE_LOG"\nprintf "controller container is unavailable\\033[31m\\n" >&2\nprintf "%9000s" "" >&2\nexit 23\n',
     ),
     writeFile(join(directory, ".openclaw-development"), "openclaw-enterprise-development-v3\n", {
       mode: 0o600,
@@ -57,7 +65,7 @@ async function fixture(t, sandboxDriver) {
     ...process.env,
     FIRST_AGENT_TEST_ENGINE_LOG: engineLog,
     OCC_DEVELOPMENT_STATE_DIRECTORY: directory,
-    PATH: `${tools}:${process.env.PATH}`,
+    PATH: commandPath(tools),
   };
   delete env.NODE_TEST_CONTEXT;
   delete env.OCC_SERVICE_KEY_FILE;
@@ -152,6 +160,82 @@ test("first-Agent requires dedicated Codex for OpenShell before external calls",
   await assert.rejects(readFile(engineLog), { code: "ENOENT" });
 });
 
+test("first-Agent recognizes the prior OpenShell PAT policy only on an identified revision", () => {
+  const values = (sandbox, approvalsReviewer = "user") => ({
+    plugins: { entries: { codex: { config: { appServer: { sandbox, approvalsReviewer } } } } },
+  });
+  const configured = values("read-only");
+  const record = { harness: "codex", sandboxDriver: "openshell", authMethod: "codex_pat" };
+  const matches = (snapshot, priorRevisionId) =>
+    firstAgentRevisionValuesMatch(snapshot, configured, record, "rev_saved", priorRevisionId);
+
+  const prior = values("workspace-write");
+  assert.equal(matches(prior, "rev_saved"), true, "read the saved or active prior revision");
+  assert.equal(matches(prior, "rev_other"), false, "do not adopt another obsolete revision");
+  assert.equal(matches(prior), false, "a new deployment cannot freeze the obsolete policy");
+  assert.equal(matches(values("danger-full-access")), true, "a new deployment uses current policy");
+  assert.equal(
+    matches(values("workspace-write", "auto_review"), "rev_saved"),
+    false,
+    "reviewer drift",
+  );
+  assert.equal(
+    firstAgentRevisionValuesMatch(
+      prior,
+      configured,
+      { ...record, authMethod: "api_key" },
+      "rev_saved",
+      "rev_saved",
+    ),
+    false,
+    "the historical exception is exclusive to PAT revisions",
+  );
+  assert.equal(
+    matches({ ...prior, tools: { allow: ["*"] } }, "rev_saved"),
+    false,
+    "the historical exception must retain unrelated configuration drift checks",
+  );
+  assert.deepEqual(prior, values("workspace-write"), "reading never rewrites a frozen revision");
+  assert.deepEqual(configured, values("read-only"), "reading never rewrites configured settings");
+});
+
+test("first-Agent flags a prior OpenShell PAT revision and points at --replace-key", () => {
+  const values = (sandbox) => ({
+    plugins: {
+      entries: { codex: { config: { appServer: { sandbox, approvalsReviewer: "user" } } } },
+    },
+  });
+  const record = { harness: "codex", sandboxDriver: "openshell", authMethod: "codex_pat" };
+  const prior = values("workspace-write");
+  assert.equal(firstAgentPriorPatPolicy(prior, record, "rev_saved", "rev_saved"), true);
+  for (const sandbox of ["danger-full-access", "read-only"]) {
+    assert.equal(
+      firstAgentPriorPatPolicy(values(sandbox), record, "rev_saved", "rev_saved"),
+      false,
+      sandbox,
+    );
+  }
+  assert.equal(firstAgentPriorPatPolicy(prior, record, "rev_saved"), false, "a new deployment");
+  assert.equal(firstAgentPriorPatPolicy(prior, record, "rev_saved", "rev_other"), false);
+  assert.equal(
+    firstAgentPriorPatPolicy(prior, { ...record, authMethod: "api_key" }, "rev_saved", "rev_saved"),
+    false,
+  );
+  for (const other of [{ sandboxDriver: undefined }, { harness: "openclaw" }]) {
+    assert.equal(
+      firstAgentPriorPatPolicy(prior, { ...record, ...other }, "rev_saved", "rev_saved"),
+      false,
+      JSON.stringify(other),
+    );
+  }
+  const warning = firstAgentPriorPatPolicyWarning("rev_saved");
+  assert.match(warning, /rev_saved/);
+  assert.match(warning, /workspace-write/);
+  assert.match(warning, /shell tools fail/);
+  assert.match(warning, /--replace-key/);
+  assert.match(warning, /current sandbox mode \(danger-full-access/);
+});
+
 test("first-Agent admits dedicated Codex with OpenShell development state", async (t) => {
   const { engineLog, env } = await fixture(t, "openshell");
 
@@ -185,6 +269,39 @@ test("first-Agent control UI requires the launcher-owned native admin endpoint",
   assert.match(await readFile(engineLog, "utf8"), /compose .* port controller 3000/);
 });
 
+test("first-Agent admits a native admin origin on the default HTTPS port", async (t) => {
+  const { directory, engineLog, env } = await fixture(t, "openshell");
+  const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
+  const host = "console.occ-dev-first-agent-test.oce.localhost";
+  // The canonical origin current Local Setup records for port 443, the explicit
+  // :443 form older Local Setup recorded, and forms that are still refused.
+  for (const [browserOrigin, admitted] of [
+    [`https://${host}`, true],
+    [`https://${host}:443`, true],
+    [`https://${host}:443/`, false],
+    [`https://${host}/`, false],
+    [`https://${host}:0443`, false],
+  ]) {
+    await rm(engineLog, { force: true });
+    await writeFile(
+      join(directory, "state.json"),
+      `${JSON.stringify({
+        ...state,
+        browserOrigin,
+        nativeAdminDomain: "agents.occ-dev-first-agent-test.oce.localhost",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const output = runFirstAgent(env, "--harness", "codex", "--control-ui");
+    if (admitted) {
+      assert.match(output, /docker did not complete successfully/, browserOrigin);
+    } else {
+      assert.match(output, /native admin endpoint is invalid/, browserOrigin);
+      await assert.rejects(readFile(engineLog), { code: "ENOENT" });
+    }
+  }
+});
+
 test("first-Agent runs psql through the k3d PostgreSQL StatefulSet", async (t) => {
   const { directory, engineLog, env } = await fixture(t, "none");
   const server = createServer((request, response) => {
@@ -197,9 +314,7 @@ test("first-Agent runs psql through the k3d PostgreSQL StatefulSet", async (t) =
     response.writeHead(data === undefined ? 404 : 200, { "content-type": "application/json" });
     response.end(JSON.stringify(data === undefined ? { error: { code: "NOT_FOUND" } } : { data }));
   });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  t.after(() => server.close());
+  await listen(t, server);
   const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
   await writeFile(
     join(directory, "state.json"),
@@ -213,10 +328,10 @@ test("first-Agent runs psql through the k3d PostgreSQL StatefulSet", async (t) =
     { mode: 0o600 },
   );
   const context = "k3d-occ-dev-first-agent-test";
-  await writeFile(
-    join(directory, "tools", "kubectl"),
-    `#!/bin/sh
-case "$*" in
+  await writeCommand(
+    join(directory, "tools"),
+    "kubectl",
+    `case "$*" in
   *" config view "*) printf '%s' '${JSON.stringify({
     "current-context": context,
     clusters: [{ cluster: { server: "https://127.0.0.1:6443" } }],
@@ -225,7 +340,6 @@ case "$*" in
   *) exit 64 ;;
 esac
 `,
-    { mode: 0o700 },
   );
 
   // spawnSync would block this process's fake controller, so wait asynchronously.
