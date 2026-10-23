@@ -269,8 +269,15 @@ func writeDevelopmentTLS(directory, prefix, subject string, hostnames []string) 
 }
 
 func replaceDevelopmentFile(path string, data []byte) error {
+	// Preserve the replaced file's mode: the Installation snapshot is 0644 so
+	// the non-root Compose containers can read their bind mounts, and rewriting
+	// it through a 0600 temporary would silently revoke that.
+	original, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
 	temporary := path + ".next"
-	if err := exclusiveWrite(temporary, data, 0600); err != nil {
+	if err := exclusiveWrite(temporary, data, original.Mode().Perm()); err != nil {
 		return err
 	}
 	if err := os.Rename(temporary, path); err != nil {

@@ -123,8 +123,17 @@ func (r *runner) selectContainerEngine(ctx context.Context, requested string, re
 		}
 		if engine == "podman" {
 			if requireCompose {
-				provider, err := exec.LookPath("podman-compose")
-				if err != nil {
+				// The Compose command uses --project-directory, which podman-compose
+				// does not support; prefer docker-compose, which reaches Podman through
+				// the DOCKER_HOST endpoint startup pins.
+				provider := ""
+				for _, candidate := range []string{"docker-compose", "podman-compose"} {
+					if found, err := exec.LookPath(candidate); err == nil {
+						provider = found
+						break
+					}
+				}
+				if provider == "" {
 					continue
 				}
 				r.env["PODMAN_COMPOSE_PROVIDER"] = provider

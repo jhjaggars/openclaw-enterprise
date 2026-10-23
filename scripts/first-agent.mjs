@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { lstat, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
@@ -92,6 +93,13 @@ async function exists(path) {
     }
     throw error;
   }
+}
+
+function availableInPath(name) {
+  const directories = (process.env.PATH ?? "").split(delimiter);
+  return directories.some(
+    (directory) => directory && existsSync(join(directory, name)),
+  );
 }
 
 function parseJson(value, description) {
@@ -186,8 +194,12 @@ async function loadLocalInstallation(harness) {
   const environment = { ...process.env, DOCKER_HOST: state.dockerHost };
   delete environment.OPENAI_API_KEY;
   delete environment.OPENAI_API_KEY_FILE;
-  if (state.containerEngine === "podman") {
-    environment.PODMAN_COMPOSE_PROVIDER ||= "podman-compose";
+  if (state.containerEngine === "podman" && !environment.PODMAN_COMPOSE_PROVIDER) {
+    // The Compose command uses --project-directory, which podman-compose does not
+    // support; docker-compose reaches Podman through the recorded DOCKER_HOST.
+    environment.PODMAN_COMPOSE_PROVIDER = availableInPath("docker-compose")
+      ? "docker-compose"
+      : "podman-compose";
   }
   const composeBase = [
     "compose",
