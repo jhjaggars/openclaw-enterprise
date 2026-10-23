@@ -49,7 +49,9 @@ route set must still enforce deny-all.
 `repositoryGitDeliveryProfile` admits exactly one repository binding:
 `git-write` maps to `repository_git`; installation profiles map to
 `github_installation`. The latter requires positive counterpart confirmation;
-a Driver that ignores the profile argument does not qualify.
+a Driver that ignores the profile argument does not qualify. Deploy refuses any
+other binding (`git-read`, `git-full`, or more than one) before reading the
+counterpart, with `409 REPOSITORY_GIT_PROFILE_UNSUPPORTED`.
 
 `repositoryGitAuthorization` distinguishes exact dispatch, `online-request`,
 `request-hook-observed` and unavailable. Admission versions 4, 5 and 6 preserve
@@ -181,6 +183,33 @@ bundled version 6 preview. Do not infer support from interface membership alone.
 Online request authorization does not establish exact dispatch or response
 custody. Those stronger guarantees require the actual enforcing sender and
 response transport. See [qualification requirements](../../testing/protected-repository-custody.md).
+
+### Request-time capacity
+
+The OCC [request registry](../../../packages/occ/src/credential-proxy.ts) keeps
+its bounds in memory, per API process:
+
+| Bound                                 | Limit                         | Released                                                                                                         |
+| ------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Operations in progress, all Sandboxes | 1024                          | When the handle closes or expires and no authentication, installation, policy, Secret or receipt work is pending |
+| Operations still authenticating       | 256, shared by all Sandboxes  | When peer verification settles; a verified request moves to its Sandbox's share                                  |
+| Operations in progress, per Sandbox   | 256 (a quarter of the cap)    | When the handle closes or expires and no installation, policy, Secret or receipt work is pending                 |
+| Request IDs, all Sandboxes            | 8192                          | 30 s after each ID's UUIDv7 creation time                                                                        |
+| Request IDs, per Sandbox              | 2048 (a quarter of the table) | Same                                                                                                             |
+
+A ready handle holds its operation slot until it closes or its deadline (at most
+30 s) passes. Per-Sandbox shares are keyed on the verified sender and Sandbox, so
+one Sandbox's traffic cannot spend another's. Before verification only an unverified
+Sandbox ID is known, so that budget is global. The bundled OpenShell verification is
+in memory, so the budget only bounds bursts; a Driver whose verification does I/O lets
+one Sandbox hold the budget for that latency. The ID bounds allow about 270 protected
+requests per second per API process, and about 68 per Sandbox. One Sandbox cannot use
+the whole operation cap or ID table, but four busy Sandboxes can. A request refused
+by the installation or route checks reserves no ID. From exchange capture on, its ID
+stays reserved for the whole window, even if the request is refused.
+Past any bound, `resolve` refuses with `unavailable`/`resolver`. The bundled
+OpenShell authority also admits at most 1024 pending exchange openings and 1024
+accepted exchanges.
 
 ## Troubleshooting
 

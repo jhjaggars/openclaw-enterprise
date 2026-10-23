@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -13,6 +12,7 @@ import {
   operationalLoggingConfiguration,
   skippedUserLogFields,
 } from "../../apps/controller/src/logging.ts";
+import { OPENSHELL_GIT_EXPIRY_CHECKS } from "../../apps/controller/src/drivers/egress-proxy/openshell-expired-git.ts";
 import {
   loadInstallationConfiguration,
   loadOperationalLoggingConfiguration,
@@ -23,10 +23,10 @@ import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
 import { createDevelopmentComputeDriver } from "../helpers/development.mjs";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
 import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
+import { temporaryDirectory } from "../helpers/temporary-directory.mjs";
 
 async function fixture(t, contents) {
-  const directory = await mkdtemp(join(tmpdir(), "occ-common-logging-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  const directory = await temporaryDirectory(t, "occ-common-logging-");
   const path = join(directory, "installation.yaml");
   await writeFile(path, contents, "utf8");
   return path;
@@ -683,6 +683,63 @@ test("worker stop-yield counts survive local JSON logging on pending and complet
   for (const stopYields of [-1, "3", true, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     emit({ event: "worker.completed", stopYields });
     assert.equal(Object.hasOwn(output.lines.at(-1), "stopYields"), false);
+  }
+});
+
+test("worker log keeps fixed codes and route fences, and drops anything shaped otherwise", () => {
+  const output = memoryDestination();
+  const emit = createWorkerLogEmitter(
+    createOccLogger({ component: "occ-worker", destination: output.destination }),
+  );
+
+  // The shapes the OpenShell Git runtime and the worker emit (finding 2244). The runtime's own
+  // events go through its fixture logger in openshell-git-runtime.test.mjs.
+  const kept = [
+    {
+      event: "worker.openshell-git-expiry",
+      outcome: "pending",
+      check: "reduced-generation-moved-across-provider-check",
+      failure: "admission_limit",
+    },
+    {
+      event: "worker.openshell-git-denied",
+      reason: "ref_not_allowed",
+      reasonCode: "route_blocked",
+    },
+    { event: "worker.openshell-git-route", status: "adopted", fence: 7 },
+    { event: "worker.completed", code: "REPOSITORY_EXECUTION_UNVERIFIED", harnessState: "lost" },
+  ];
+  for (const event of kept) {
+    emit(event);
+    const line = output.lines.at(-1);
+    for (const [key, value] of Object.entries(event)) {
+      assert.equal(line[key], value, `${event.event} keeps ${key}`);
+    }
+  }
+
+  // Every expiry step the runtime can report passes as a code.
+  for (const check of OPENSHELL_GIT_EXPIRY_CHECKS) {
+    emit({ event: "worker.openshell-git-expiry", outcome: "pending", check });
+    assert.equal(output.lines.at(-1).check, check);
+  }
+
+  // Free text, a credential shape, an overlong value or a non-string never passes as a code;
+  // a fence is a non-negative safe integer.
+  const rejected = [
+    ["check", "the detach is still pending"],
+    ["failure", "connect ECONNREFUSED 10.0.0.1:443"],
+    ["reasonCode", "sk-proj-abcdefghijklmnopqrstuvwx"],
+    ["reasonCode", `r${"x".repeat(64)}`],
+    ["harnessState", { state: "lost" }],
+    ["failure", 14],
+    ["fence", -1],
+    ["fence", 1.5],
+    ["fence", "3"],
+    ["fence", Number.MAX_SAFE_INTEGER + 1],
+  ];
+  for (const [key, value] of rejected) {
+    emit({ event: "worker.openshell-git-expiry", outcome: "pending", [key]: value });
+    assert.equal(Object.hasOwn(output.lines.at(-1), key), false, `${key}: ${String(value)}`);
   }
 });
 

@@ -87,10 +87,35 @@ export const STREAM_LEASE_CEILING_MS = 15 * 60_000;
 /** Progress sooner than this after the last policy check keeps the lease unchanged. */
 export const STREAM_LEASE_RECHECK_MS = 15_000;
 const maximumStreamBodyBytes = 4 * 1024 * 1024;
+/**
+ * Bound on remembered request IDs across all Sandboxes of this process. Each ID is held
+ * until its UUIDv7 creation time plus 30 s, so this also bounds the protected request
+ * rate (about 270/s).
+ */
+export const REPLAY_TABLE_CAPACITY = 8192;
+/**
+ * One Sandbox's share of the replay table (about 68 protected requests/s sustained), so a
+ * single Sandbox cannot refuse every other Agent in the installation.
+ */
+export const REPLAY_SANDBOX_SHARE = REPLAY_TABLE_CAPACITY / 4;
+/**
+ * Bound on operations in progress across all Sandboxes of this process: requests still
+ * authenticating, pending policy, Secret or receipt work, and outstanding handles.
+ */
+export const OPERATION_CAPACITY = 1024;
+/**
+ * Requests still authenticating, across all Sandboxes. Only an unauthenticated Sandbox ID
+ * is known here, so this budget is global; verification is in memory, so it bounds bursts.
+ */
+export const OPERATION_AUTHENTICATION_BUDGET = OPERATION_CAPACITY / 4;
+/** One authenticated Sandbox's share of the operations in progress. */
+export const OPERATION_SANDBOX_SHARE = OPERATION_CAPACITY / 4;
 
-// One global slot is shared by the live handle and every still-running phase.
+// One slot is shared by the live handle and every still-running phase. It counts toward
+// the authentication budget until verification settles, then toward one Sandbox's share.
 interface OperationCharge {
   holds: number;
+  share?: string;
 }
 
 interface OperationRecord {
@@ -168,8 +193,14 @@ export function egressInjectionDigest(headers: readonly (readonly [string, strin
  */
 export class CredentialProxy implements CredentialProxyExchange {
   private readonly records = new Map<string, OperationRecord>();
-  private readonly requests = new Map<string, number>();
+  private readonly requests = new Map<
+    string,
+    { readonly expiresAt: number; readonly share: string }
+  >();
+  private readonly replayShares = new Map<string, number>();
+  private readonly operationShares = new Map<string, number>();
   private activeOperations = 0;
+  private authenticating = 0;
   private readonly ports: EgressAuthorityPorts;
 
   constructor(ports: EgressAuthorityPorts) {
@@ -187,7 +218,29 @@ export class CredentialProxy implements CredentialProxyExchange {
     charge.holds -= 1;
     if (charge.holds === 0) {
       this.activeOperations -= 1;
+      if (charge.share === undefined) {
+        this.authenticating -= 1;
+      } else {
+        const held = this.operationShares.get(charge.share)! - 1;
+        if (held === 0) {
+          this.operationShares.delete(charge.share);
+        } else {
+          this.operationShares.set(charge.share, held);
+        }
+      }
     }
+  }
+
+  /** Moves an authenticated request's slot from the authentication budget to its share. */
+  private chargeShare(charge: OperationCharge, share: string): boolean {
+    const held = this.operationShares.get(share) ?? 0;
+    if (held >= OPERATION_SANDBOX_SHARE) {
+      return false;
+    }
+    this.authenticating -= 1;
+    charge.share = share;
+    this.operationShares.set(share, held + 1);
+    return true;
   }
 
   private discard(handle: string, record: OperationRecord): void {
@@ -208,11 +261,44 @@ export class CredentialProxy implements CredentialProxyExchange {
         this.discard(handle, record);
       }
     }
-    for (const [key, expiresAt] of this.requests) {
+    this.pruneReplay(now);
+  }
+
+  private pruneReplay(now: number): void {
+    for (const [key, { expiresAt, share }] of this.requests) {
       if (expiresAt <= now) {
         this.requests.delete(key);
+        const held = this.replayShares.get(share)! - 1;
+        if (held === 0) {
+          this.replayShares.delete(share);
+        } else {
+          this.replayShares.set(share, held);
+        }
       }
     }
+  }
+
+  /** Check and reserve in one turn: a concurrent duplicate cannot pass between them. */
+  private reserveReplay(
+    key: string,
+    share: string,
+    expiresAt: number,
+  ): (EgressResolution & { kind: "refused" }) | undefined {
+    if (this.requests.has(key)) {
+      return refuse("invalid_handle");
+    }
+    const full = () =>
+      this.requests.size >= REPLAY_TABLE_CAPACITY ||
+      (this.replayShares.get(share) ?? 0) >= REPLAY_SANDBOX_SHARE;
+    if (full()) {
+      // Entries may have expired while the installation lookup was pending.
+      this.pruneReplay(this.ports.now());
+      if (full()) {
+        return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
+      }
+    }
+    this.requests.set(key, { expiresAt, share });
+    this.replayShares.set(share, (this.replayShares.get(share) ?? 0) + 1);
   }
 
   async resolve(
@@ -227,10 +313,14 @@ export class CredentialProxy implements CredentialProxyExchange {
     this.prune();
     // Reserve before authentication or any other await. Pending Secret/policy I/O
     // consumes the same capacity as an outstanding material handle.
-    if (this.activeOperations >= 1024) {
+    if (
+      this.activeOperations >= OPERATION_CAPACITY ||
+      this.authenticating >= OPERATION_AUTHENTICATION_BUDGET
+    ) {
       return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
     }
     this.activeOperations += 1;
+    this.authenticating += 1;
     const charge: OperationCharge = { holds: 1 };
     try {
       // Copy body bytes separately without moving the field: the sender's request digest
@@ -260,6 +350,12 @@ export class CredentialProxy implements CredentialProxyExchange {
     if (!peer || peer.sandboxId !== sandboxId || !(Date.parse(peer.expiresAt) > now)) {
       return refuse("identity");
     }
+    // The sender and Sandbox are authenticated from here, so a share keyed on them cannot
+    // be spent by another Sandbox's traffic. A full share refuses before the replay check.
+    const share = JSON.stringify([peer.sender, sandboxId]);
+    if (!this.chargeShare(charge, share)) {
+      return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
+    }
     const deadline = Date.parse(request.deadlineAt);
     const createdAt = operationCreatedAt(request.id);
     if (
@@ -274,14 +370,10 @@ export class CredentialProxy implements CredentialProxyExchange {
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
     }
     const replayKey = JSON.stringify([peer.sender, sandboxId, peer.instanceId, request.id]);
+    // Refuse a known replay before any I/O; the reservation below checks again.
     if (this.requests.has(replayKey)) {
       return refuse("invalid_handle");
     }
-    if (this.requests.size >= 4096) {
-      return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
-    }
-    // Reserve before installation/policy I/O. Failed attempts cannot reuse their request ID.
-    this.requests.set(replayKey, createdAt + 30_000);
     const installation = await this.ports.installation(peer);
     if (
       !installation ||
@@ -312,8 +404,15 @@ export class CredentialProxy implements CredentialProxyExchange {
       return refuse(matches.length > 1 ? "ambiguous_route" : "unsupported_operation");
     }
     const { route, provider, operation } = matches[0]!;
-    if (deadline > createdAt + route.deadlineMs) {
+    // The lookup may outlast the deadline, and with it the replay horizon a key would keep.
+    if (deadline > createdAt + route.deadlineMs || this.ports.now() >= deadline) {
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
+    }
+    // Reserve after the side-effect-free installation and route refusals, before capture,
+    // policy or Secret I/O. From here a failed attempt cannot reuse its request ID.
+    const reserved = this.reserveReplay(replayKey, share, createdAt + 30_000);
+    if (reserved) {
+      return reserved;
     }
     const captured: CapturedEgressUse = {
       ...immutableCopy({

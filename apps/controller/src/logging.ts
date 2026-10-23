@@ -203,6 +203,18 @@ function safePath(value: unknown): string | undefined {
     : undefined;
 }
 
+// Fields that name a fixed code, from any emitter: for example an OpenShell Git expiry check, a
+// failure class, the reason code an Agent is shown, or a Harness lifecycle state. Only a short
+// identifier passes, never free text.
+const CODE_FIELDS = new Set(["check", "failure", "harnessState", "reasonCode"]);
+const SAFE_CODE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+
+function safeCode(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_CODE.test(value) && !resemblesToken(value)
+    ? value
+    : undefined;
+}
+
 function safeNumber(key: string, value: number): number | undefined {
   if (!Number.isFinite(value)) {
     return undefined;
@@ -326,13 +338,28 @@ function sanitizedEvent(
     typeof rawEvent === "string" ? (safeString(rawEvent) ?? "occ.event") : "occ.event";
   const result: Record<string, unknown> = { event: eventName };
   for (const [key, value] of Object.entries(event)) {
+    if (CODE_FIELDS.has(key)) {
+      const code = safeCode(value);
+      if (code !== undefined) {
+        result[key] = code;
+      }
+      continue;
+    }
+    if (key === "fence") {
+      // A route generation, such as the OpenShell Git fence a worker holds: a non-negative integer.
+      if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+        result.fence = value;
+      }
+      continue;
+    }
     if (key === "event" || !ALLOWED_FIELDS.has(key)) {
       continue;
     }
     if (key === "details") {
       if (
         (eventName === "startup-error" || eventName === "worker.startup-error") &&
-        event.code === "DRIVER_CONFIGURATION_INVALID" &&
+        (event.code === "DRIVER_CONFIGURATION_INVALID" ||
+          event.code === "CHART_LISTENER_MISMATCH") &&
         Array.isArray(value)
       ) {
         result.details = configurationLogDetails(value);

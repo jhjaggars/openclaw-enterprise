@@ -18,6 +18,11 @@ import {
   type OpenShellProxyOptions,
 } from "../drivers/egress-proxy/openshell.ts";
 import type { EgressAuthorityConfiguration } from "./egress-authority.ts";
+import {
+  chartListeners,
+  InstallationFieldError,
+  requireChartListener,
+} from "./installation-fields.ts";
 import { assertConfigurationSchema, requireConfiguration } from "@openclaw-enterprise/contracts";
 import { validateSandboxNetworkGrants } from "@openclaw-enterprise/contracts";
 import type { SandboxNetworkGrant } from "@openclaw-enterprise/contracts";
@@ -706,6 +711,13 @@ export async function loadInstallationConfiguration(options: {
     }
   }
 
+  requireChartListener(egressAuthority, environment, chartListeners.egressAuthority);
+  requireChartListener(
+    repositoryTransportConfiguration?.authority,
+    environment,
+    chartListeners.openshellGit,
+  );
+
   const backends = backendConfiguration(
     configuration.backend,
     serviceAccount,
@@ -866,12 +878,44 @@ export async function loadInstallationConfiguration(options: {
     );
   }
   if (repositoryDeliveryMode === "native") {
-    const kubernetes = compute.configuration as unknown as KubernetesComputeDriverOptions;
-    if (kubernetes.network.repositoryCredentials?.port !== 8443) {
-      throw new Error(
-        "repository.nativeSender requires an exact Kubernetes repository service peer on port 8443.",
-      );
+    const peer = (compute.configuration as unknown as KubernetesComputeDriverOptions).network
+      .repositoryCredentials;
+    if (peer?.port !== 8443) {
+      // A field error, so API and worker startup logs name the field (finding 2227).
+      const path = "/drivers/compute/configuration/network/repositoryCredentials";
+      throw new InstallationFieldError([
+        peer === undefined
+          ? {
+              path,
+              code: "REQUIRED",
+              message:
+                "repository.nativeSender requires drivers.compute.configuration.network.repositoryCredentials, the Kubernetes repository service peer.",
+            }
+          : {
+              path: `${path}/port`,
+              code: "INVALID_VALUE",
+              message:
+                "repository.nativeSender requires drivers.compute.configuration.network.repositoryCredentials.port to be 8443.",
+            },
+      ]);
     }
+  } else if (
+    kubernetesCompute &&
+    (compute.configuration as unknown as KubernetesComputeDriverOptions).network
+      .repositoryCredentials !== undefined
+  ) {
+    // The peer makes Compute project and clean up repository material Secrets. Only native
+    // delivery creates them, and only its chart grants the worker Secret list, so a peer
+    // left behind after a switch to protected Git fails every stop, retire and delete with a
+    // 403 (finding 2212). A field error, so startup logs name the field (finding 2226).
+    throw new InstallationFieldError([
+      {
+        path: "/drivers/compute/configuration/network/repositoryCredentials",
+        code: "INVALID_VALUE",
+        message:
+          "drivers.compute.configuration.network.repositoryCredentials requires repository.nativeSender; remove it for protected Git or when no repository is configured.",
+      },
+    ]);
   }
   const sandbox =
     sandboxSelection === undefined
@@ -984,6 +1028,7 @@ export async function loadInstallationConfiguration(options: {
     prepared: preparedRepositoryGit !== undefined,
     repository: repositoryRuntime !== undefined,
     backend: openShellBackend,
+    backendIndex: openShellBackend === undefined ? -1 : backends.indexOf(openShellBackend),
     sandbox: sandbox !== undefined,
     external: sandboxPackage !== undefined,
     kubernetes: kubernetesCompute,
