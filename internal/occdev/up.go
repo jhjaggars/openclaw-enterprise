@@ -226,7 +226,7 @@ func Up(ctx context.Context, opts Options) (result error) {
 	started, clusterAttempted, clusterCreationFailed, keyWritten := false, false, false, false
 	defer func() {
 		defer lock.Close()
-		if result == nil {
+		if result == nil || os.Getenv("OCC_DEVELOPMENT_KEEP_ON_FAILURE") != "" {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

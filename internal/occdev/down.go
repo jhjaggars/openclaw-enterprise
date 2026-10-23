@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -79,7 +78,9 @@ func Down(ctx context.Context, opts Options) error {
 		r.env["KUBECONFIG"] = filepath.Join(directory, "kubeconfig")
 		r.engine = state.ContainerEngine
 		if r.engine == "podman" && state.DeploymentMode == "" {
-			provider, err := exec.LookPath("podman-compose")
+			// The same provider preference as startup, so every host that can
+			// start the Compose control plane can also stop it.
+			provider, err := composeProvider()
 			if err != nil {
 				return err
 			}

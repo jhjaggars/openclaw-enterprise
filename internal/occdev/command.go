@@ -135,7 +135,7 @@ func (r *runner) selectContainerEngine(ctx context.Context, requested string, re
 		}
 		if engine == "podman" {
 			if requireCompose {
-				provider, err := exec.LookPath("podman-compose")
+				provider, err := composeProvider()
 				if err != nil {
 					continue
 				}
@@ -158,6 +158,22 @@ func (r *runner) selectContainerEngine(ctx context.Context, requested string, re
 	}
 	return fmt.Errorf("a running %s container engine is required", requested)
 }
+
+// composeProvider resolves the Compose provider Podman's `podman compose`
+// delegates to. The Kubernetes-profile Compose command passes
+// --project-directory, which standalone podman-compose does not support, so
+// prefer docker-compose, which reaches Podman through the DOCKER_HOST endpoint
+// startup pins, and keep podman-compose for hosts without it. Up and down must
+// agree, or a host with only docker-compose could start a stack it cannot stop.
+func composeProvider() (string, error) {
+	for _, candidate := range []string{"docker-compose", "podman-compose"} {
+		if found, err := exec.LookPath(candidate); err == nil {
+			return found, nil
+		}
+	}
+	return "", fmt.Errorf("Podman Compose requires docker-compose or podman-compose on PATH")
+}
+
 func (r *runner) pinEndpoint(ctx context.Context) error {
 	endpoint := r.env["DOCKER_HOST"]
 	if r.engine == "podman" {
