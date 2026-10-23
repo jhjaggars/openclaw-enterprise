@@ -265,7 +265,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 	}
 	fmt.Fprintf(r.opts.Out, "Creating Kubernetes-only k3d cluster %s...\n", state.Cluster)
 	admissionPath := ""
-	if sandboxDriver == "openshell" {
+	if sandboxDriver == "openshell" && !(state.openShellExternal != nil && state.openShellExternal.managed) {
 		admissionPath, err = prepareOpenShellAdmission(directory)
 		if err != nil {
 			return err
@@ -380,9 +380,10 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 		return err
 	}
 	var assets *openShellDevelopmentAssets
-	if sandboxDriver == "openshell" {
+	if sandboxDriver == "openshell" && !(state.openShellExternal != nil && state.openShellExternal.managed) {
 		// Import the larger platform images first so image garbage collection cannot
 		// evict idle OpenShell images before their workloads are installed.
+
 		fmt.Fprintln(r.opts.Out, "Preparing pinned OpenShell development assets...")
 		assets, err = r.prepareOpenShell(ctx, state, timeout)
 		if err != nil {

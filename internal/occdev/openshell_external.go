@@ -20,6 +20,10 @@ type externalOpenShell struct {
 	oidcTokenURL     string
 	oidcClientID     string
 	clientSecretPath string
+	// managed selects the managed workspace mode: the gateway owns every
+	// sandbox-side Kubernetes object, so the profile installs no local OpenShell
+	// assets and renders the managed Sandbox Driver configuration.
+	managed bool
 	// addresses and port are the translated exact gateway targets, resolved once
 	// per start for NetworkPolicies, which cannot select hostnames.
 	addresses []string
@@ -44,6 +48,13 @@ func (e *externalOpenShell) resolve() error {
 // an external endpoint and are rejected rather than ignored.
 func readExternalOpenShell(env map[string]string) (*externalOpenShell, error) {
 	endpoint := env["OCC_DEVELOPMENT_OPENSHELL_GATEWAY_ENDPOINT"]
+	mode := env["OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE"]
+	if mode != "" && mode != "managed" && mode != "operator" {
+		return nil, fmt.Errorf("OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE must be managed or operator")
+	}
+	if mode == "managed" && endpoint == "" {
+		return nil, fmt.Errorf("OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE=managed requires OCC_DEVELOPMENT_OPENSHELL_GATEWAY_ENDPOINT")
+	}
 	oidc := map[string]string{
 		"OCC_DEVELOPMENT_OPENSHELL_OIDC_TOKEN_URL":          env["OCC_DEVELOPMENT_OPENSHELL_OIDC_TOKEN_URL"],
 		"OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_ID":          env["OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_ID"],
@@ -86,6 +97,7 @@ func readExternalOpenShell(env map[string]string) (*externalOpenShell, error) {
 		oidcTokenURL:     oidc["OCC_DEVELOPMENT_OPENSHELL_OIDC_TOKEN_URL"],
 		oidcClientID:     oidc["OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_ID"],
 		clientSecretPath: secretPath,
+		managed:          mode == "managed",
 	}, nil
 }
 

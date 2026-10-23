@@ -243,3 +243,94 @@ func TestExternalOpenShellNetworkPoliciesAdmitOnlyTheTranslatedAddress(t *testin
 		t.Fatalf("unexpected external egress: %#v", egress)
 	}
 }
+
+func TestReadExternalOpenShellManagedSelection(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "client-secret")
+	if err := os.WriteFile(secret, []byte("test-secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	base := map[string]string{
+		"OCC_DEVELOPMENT_OPENSHELL_GATEWAY_ENDPOINT":        "https://openshell-gateway.example.com:8443",
+		"OCC_DEVELOPMENT_OPENSHELL_OIDC_TOKEN_URL":          "https://idp.example.com/token",
+		"OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_ID":          "occ-openshell",
+		"OCC_DEVELOPMENT_OPENSHELL_OIDC_CLIENT_SECRET_FILE": secret,
+	}
+	external, err := readExternalOpenShell(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if external.managed {
+		t.Fatal("managed must be opt-in")
+	}
+	managed := map[string]string{}
+	for key, value := range base {
+		managed[key] = value
+	}
+	managed["OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE"] = "managed"
+	external, err = readExternalOpenShell(managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !external.managed {
+		t.Fatal("the managed selection must be recorded")
+	}
+	// Managed mode has no meaning without an external gateway.
+	invalid := map[string]string{"OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE": "managed"}
+	if _, err := readExternalOpenShell(invalid); err == nil {
+		t.Fatal("managed without an endpoint must be rejected")
+	}
+	invalid["OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_MODE"] = "shared"
+	if _, err := readExternalOpenShell(invalid); err == nil {
+		t.Fatal("an unknown workspace mode must be rejected")
+	}
+}
+
+func TestExternalManagedInstallationRendersManagedSandboxConfiguration(t *testing.T) {
+	state := externalTestState(t)
+	state.openShellExternal.managed = true
+	// Managed mode installs no local OpenShell assets.
+	if err := writeInstallation(state, "runtime@"+profileTestDigest, nil, "", "", "10.42.0.1/32"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(state.directory, "installation.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var installation struct {
+		Backend []struct {
+			Configuration struct {
+				Auth map[string]any `yaml:"auth"`
+			} `yaml:"configuration"`
+		} `yaml:"backend"`
+		Drivers struct {
+			Sandbox struct {
+				Configuration struct {
+					Gateway struct {
+						WorkspaceMode          string           `yaml:"workspaceMode"`
+						OperatorResources      []map[string]any `yaml:"operatorWorkspaceResources"`
+						NetworkPolicyResources []map[string]any `yaml:"networkPolicyResources"`
+					} `yaml:"gateway"`
+					Kubernetes map[string]any `yaml:"kubernetes"`
+				} `yaml:"configuration"`
+			} `yaml:"sandbox"`
+		} `yaml:"drivers"`
+	}
+	if err := yaml.Unmarshal(data, &installation); err != nil {
+		t.Fatal(err)
+	}
+	sandbox := installation.Drivers.Sandbox.Configuration
+	if sandbox.Gateway.WorkspaceMode != "managed" {
+		t.Fatalf("expected managed workspace mode, got %q", sandbox.Gateway.WorkspaceMode)
+	}
+	// The driver rejects operator-only resources in managed mode, so the
+	// rendered configuration must not carry them.
+	if len(sandbox.Gateway.OperatorResources) != 0 || len(sandbox.Gateway.NetworkPolicyResources) != 0 {
+		t.Fatal("managed mode must not render operator workspace or NetworkPolicy resources")
+	}
+	if len(sandbox.Kubernetes) != 0 {
+		t.Fatalf("managed mode must render an empty kubernetes block: %#v", sandbox.Kubernetes)
+	}
+	if len(installation.Backend) != 1 || installation.Backend[0].Configuration.Auth["mode"] != "oidcClientCredentials" {
+		t.Fatalf("expected the OIDC Backend: %#v", installation.Backend)
+	}
+}

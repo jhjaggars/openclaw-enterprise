@@ -315,7 +315,7 @@ func Up(ctx context.Context, opts Options) (result error) {
 		return err
 	}
 	clusterArgs = append(clusterArgs, resolverArgs...)
-	if sandboxDriver == "openshell" {
+	if sandboxDriver == "openshell" && !(state.openShellExternal != nil && state.openShellExternal.managed) {
 		clusterImage = openShellK3sImage
 		admissionPath, err := prepareOpenShellAdmission(directory)
 		if err != nil {
@@ -339,9 +339,10 @@ func Up(ctx context.Context, opts Options) (result error) {
 		return err
 	}
 	var openShellAssets *openShellDevelopmentAssets
-	if sandboxDriver == "openshell" {
+	if sandboxDriver == "openshell" && !(state.openShellExternal != nil && state.openShellExternal.managed) {
 		// Import the large runtime first so image garbage collection cannot evict
 		// idle OpenShell images before their workloads are installed.
+
 		fmt.Fprintln(r.opts.Out, "Preparing pinned OpenShell development assets...")
 		openShellAssets, err = r.prepareOpenShell(ctx, state, time.Duration(timeout)*time.Second)
 		if err != nil {

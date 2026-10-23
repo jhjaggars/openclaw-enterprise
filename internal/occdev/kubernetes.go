@@ -427,7 +427,10 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 		config["presets"] = map[string]any{"includeDefaults": true}
 	}
 	if s.SandboxDriver == "openshell" {
-		if openShell == nil {
+		// Managed mode installs no local OpenShell assets: the external gateway
+		// owns every sandbox-side Kubernetes object.
+		managedExternal := s.openShellExternal != nil && s.openShellExternal.managed
+		if openShell == nil && !managedExternal {
 			return fmt.Errorf("OpenShell development assets are required")
 		}
 		if s.openShellExternal == nil && openShellGatewayAddress == "" {
@@ -453,7 +456,11 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 				"port":    8080,
 			}
 		}
-		config["drivers"].(map[string]any)["sandbox"] = openShellInstallationConfiguration(s, openShell.workspaceResources, harnessResources)
+		var workspaceResources []any
+		if openShell != nil {
+			workspaceResources = openShell.workspaceResources
+		}
+		config["drivers"].(map[string]any)["sandbox"] = openShellInstallationConfiguration(s, workspaceResources, harnessResources)
 		config["drivers"].(map[string]any)["credential_gateway"] = map[string]any{
 			"id": openShellCredentialGatewayID,
 			// Native OpenClaw uses Node; retain both architecture-specific Codex allowances.
@@ -550,6 +557,26 @@ func openShellOidcAuthConfiguration(external *externalOpenShell) map[string]any 
 }
 
 func openShellInstallationConfiguration(s *developmentState, workspaceResources []any, harnessResources map[string]any) map[string]any {
+	if s.openShellExternal != nil && s.openShellExternal.managed {
+		// Managed mode: the gateway creates and owns the workspace namespace,
+		// ServiceAccount, and policies, so the Sandbox Driver configuration
+		// carries no operator workspace resources and no local Pod observation.
+		return map[string]any{
+			"id": openShellSandboxID,
+			"configuration": map[string]any{
+				"startupDelayMs": 30000,
+				"gateway":        map[string]any{"workspaceMode": "managed"},
+				"kubernetes":     map[string]any{},
+				"policy": map[string]any{
+					"process": map[string]string{"runAsUser": "1000", "runAsGroup": "1000"},
+					"networkPolicies": []any{
+						map[string]any{"name": "source-control", "endpoints": []any{map[string]any{"host": "github.com", "ports": []int{443}, "tls": "skip"}}, "binaries": []any{map[string]string{"path": "/usr/bin/git"}}},
+					},
+				},
+				"sandboxNamePrefix": "os",
+			},
+		}
+	}
 	gatewayNamespace := openShellGatewayNamespace
 	if s.DeploymentMode == "k3d" {
 		gatewayNamespace = s.PlatformNamespace
@@ -557,7 +584,6 @@ func openShellInstallationConfiguration(s *developmentState, workspaceResources 
 	gatewayLabels := map[string]string{
 		"app.kubernetes.io/name":     "openshell",
 		"app.kubernetes.io/instance": openShellGatewayService,
-	}
 	return map[string]any{
 		"id": openShellSandboxID,
 		"configuration": map[string]any{
