@@ -102,19 +102,20 @@ test(
           "OPENCLAW_POD_UID=owned-native-tls",
         ],
       });
-      const nativeProbe = enabled
-        ? `require("https").get({hostname:"127.0.0.1",port:8080,path:"/readyz",servername:"openclaw-gateway",ca:require("fs").readFileSync("/home/node/tls/cert.pem")},r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on("error",()=>process.exit(1));`
-        : `fetch("http://127.0.0.1:8080/readyz").then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1));`;
-      await waitForListenerReady(containerName, nativeProbe);
-      const readiness = () =>
-        runDocker([
-          "exec",
-          containerName,
-          "node",
-          "-e",
-          'fetch("http://127.0.0.1:18791/readyz").then(async r=>{if(await r.text()!=="")process.exit(2);console.log(r.status);process.exit(r.status===200?0:1)}).catch(()=>process.exit(2));',
-        ]);
+      const readinessProbe =
+        'fetch("http://127.0.0.1:18791/readyz").then(async r=>{if(await r.text()!=="")process.exit(2);console.log(r.status);process.exit(r.status===200?0:1)}).catch(()=>process.exit(2));';
+      const readiness = () => runDocker(["exec", containerName, "node", "-e", readinessProbe]);
       if (enabled) {
+        // Establish complete native readiness before attributing Compute's refusal to TLS.
+        const nativeProbe = `
+          const options = {hostname:"127.0.0.1",port:8080,servername:"openclaw-gateway",ca:require("fs").readFileSync("/home/node/tls/cert.pem")};
+          Promise.all(["/startupz","/readyz"].map(path => new Promise(resolve => {
+            require("https").get({...options,path}, r => {
+              r.resume(); resolve(r.statusCode === 200);
+            }).on("error", () => resolve(false));
+          }))).then(results => process.exit(results.every(Boolean) ? 0 : 1));
+        `;
+        await waitForListenerReady(containerName, nativeProbe);
         await assert.rejects(
           readiness,
           (error) => error.code === 1 && error.stdout.trim() === "503",
@@ -127,7 +128,8 @@ test(
           );
         }
       } else {
-        await readiness();
+        // A native /readyz response alone does not establish Compute readiness.
+        await waitForListenerReady(containerName, readinessProbe);
         for (const [, driver] of drivers) {
           assert.doesNotThrow(() => driver.validateGatewaySettings(configuration));
         }
