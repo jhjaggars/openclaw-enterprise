@@ -292,15 +292,12 @@ The Kubernetes Configuration Driver stores live native documents in tenant Confi
 
 ## Gateway tool policy
 
-For dedicated OpenClaw on Kubernetes and dedicated Codex on Kubernetes or Docker,
-Compute automatically applies a reviewed Gateway tool baseline. Plugin approval
-controls installation and enablement. Model access separately requires the
-concrete tool to appear in `tools.gatewayPolicy.allow`; selecting a plugin or
-adding ordinary `tools.alsoAllow` grants does not approve it for model use.
+Dedicated OpenClaw on Kubernetes and Codex on Kubernetes or Docker automatically
+apply a reviewed Gateway tool baseline after plugin grants. Plugin approval
+permits installation and enablement; model access also requires concrete tool
+names in `tools.gatewayPolicy.allow`. Ordinary `tools.alsoAllow` cannot widen it.
 
-Trusted OCE Configuration authors can supply a complete, narrower list or add
-reviewed task tools. For example, this policy allows session patching, reads and
-an independently selected Diffs plugin:
+Trusted Configuration authors can select reviewed task tools:
 
 ```json
 {
@@ -313,24 +310,22 @@ an independently selected Diffs plugin:
 }
 ```
 
-Omitting the policy uses the [reviewed baseline](../../apps/controller/src/drivers/compute/gateway-tool-policy.ts).
-An explicit empty `allow` withholds the underlying Gateway tool catalog. Action-bearing tools require
-explicit action lists; lists for baseline tools may narrow their reviewed actions.
-Known Gateway administrative tools and additional baseline actions are rejected.
-New plugin task tools require their concrete names and, where supported, actions.
-Ordinary profiles, denies and Codex dynamic-tool exclusions still apply.
+Diffs must separately be enabled as a plugin. Omitting the policy uses the
+[baseline](../../apps/controller/src/drivers/compute/gateway-tool-policy.ts);
+empty `allow` withholds Gateway tools. Action-bearing tools require explicit
+allowed actions. Baseline actions can only narrow; administrative tools and
+additional baseline actions are rejected. Profiles, denies and Codex dynamic-tool
+exclusions still apply.
 
-Compute always sets `tools.gatewayPolicy.automations.scope: "caller"`,
-`tools.gatewayPolicy.automations.allowCommandJobs: false`,
-`agents.defaults.modelSelectionScope: "session"` and `cron.triggers.enabled: false`.
-Direct human Gateway administration retains its existing authorization. The
+Compute enforces `automations.scope: "caller"` and `allowCommandJobs: false` under
+`tools.gatewayPolicy`, plus `agents.defaults.modelSelectionScope: "session"` and
+`cron.triggers.enabled: false`. Human Gateway administration and Codex native
+tools retain their existing authorization.
+
+Deploy a new Agent revision to change policy. Replacement applies it after old
+work ends; peer respawn restores the deployed policy. The
 [deployment flow](../flows/agent-plugins.md#4-prepare-native-runtime-state-and-hand-off-readiness)
-explains startup compatibility checks and policy restoration on peer respawn.
-Codex native tools and apps remain governed by their own policies.
-
-To change this policy, save the Configuration and deploy a new Agent revision.
-The new policy applies after Gateway replacement and affected old work ends.
-A Kubernetes peer respawn reapplies the same deployed policy.
+details compatibility checks.
 
 ## Related
 
