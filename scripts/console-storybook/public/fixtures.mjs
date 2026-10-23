@@ -313,6 +313,25 @@ export function installFixture(scenario, evidence) {
         delivery: { type: "env" },
       };
     }
+    // The demo Agent was granted the Slack Secrets it binds, unless the scenario left one out:
+    // an administrator's console reads these grants (finding 1920).
+    roles.push({
+      id: "role_demo_secret_operate",
+      namespaceId,
+      name: "Agent Secret operate",
+      permissions: [{ action: "operate", resourceKind: "secret" }],
+    });
+    for (const key of keys.filter((name) => name !== scenario.slackGrantMissing)) {
+      bindings.push({
+        id: `binding_demo_${key.toLowerCase()}`,
+        namespaceId,
+        subjectKind: "identity",
+        subjectId: "identity_demo_agent",
+        roleId: "role_demo_secret_operate",
+        resourceKind: "secret",
+        resourceId: `sec_demo_${key.toLowerCase()}`,
+      });
+    }
   }
   configs.set(config.id, config);
   const selectedAuth =
@@ -327,6 +346,37 @@ export function installFixture(scenario, evidence) {
             : scenario.auth === "oauth"
               ? { method: "credential_source", sourceId: "cs_00000000-0000-4000-8000-000000000010" }
               : auth;
+  // The demo Agent was granted its harness authentication Secret or credential source, unless the
+  // scenario left it out: an administrator's Credentials tab reads this grant (finding 2260).
+  const harnessCredential =
+    selectedAuth?.method === "credential_source"
+      ? { kind: "credential_source", id: selectedAuth.sourceId }
+      : selectedAuth?.source?.kind === "secret"
+        ? { kind: "secret", id: selectedAuth.source.id }
+        : null;
+  if (harnessCredential && !scenario.harnessGrantMissing) {
+    const roleId = `role_demo_${harnessCredential.kind}_operate`;
+    if (!roles.some((role) => role.id === roleId)) {
+      roles.push({
+        id: roleId,
+        namespaceId,
+        name:
+          harnessCredential.kind === "secret"
+            ? "Agent Secret operate"
+            : "Agent Credential Source operate",
+        permissions: [{ action: "operate", resourceKind: harnessCredential.kind }],
+      });
+    }
+    bindings.push({
+      id: "binding_demo_harness_auth",
+      namespaceId,
+      subjectKind: "identity",
+      subjectId: "identity_demo_agent",
+      roleId,
+      resourceKind: harnessCredential.kind,
+      resourceId: harnessCredential.id,
+    });
+  }
   let selectedRevisionId = null;
   if (scenario.candidateSuperseded) {
     // A newer v8 the viewer cannot read superseded v7 and is now selected.

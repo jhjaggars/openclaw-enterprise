@@ -45,6 +45,10 @@ export const CredentialsSlackGrantDenied = {
   ...story("credentialsSlackGrantDenied"),
   name: "Slack grant denied",
 };
+export const CredentialsSlackGrantMissing = {
+  ...story("credentialsSlackGrantMissing"),
+  name: "Slack Secret bound without an Agent grant",
+};
 export const CredentialsSavePending = {
   ...story("credentialsSavePending"),
   name: "Channel Secret save pending",
@@ -79,6 +83,14 @@ export const AuthSaveRefused = {
 export const AuthSecretGrantDenied = {
   ...story("authSecretGrantDenied"),
   name: "Authentication saved, grant denied",
+};
+export const AuthSecretGrantMissing = {
+  ...story("authSecretGrantMissing"),
+  name: "Authentication Secret without an Agent grant",
+};
+export const AuthSecretGrantMemberUnverified = {
+  ...story("authSecretGrantMemberUnverified"),
+  name: "Member authentication saved, access not verified",
 };
 export const AuthSecretGrantLoading = {
   ...story("authSecretGrantLoading"),
