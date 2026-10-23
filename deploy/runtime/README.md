@@ -27,7 +27,9 @@ split storage; published `2026.9.5` packages do not contain that complete contra
 The source pin includes the reviewed Gateway tool policy and native child-worktree
 changes required by dedicated deployments. Child spawning waits for placement
 started by session creation, then rechecks parent authority and child placement
-before dispatch. It is not a published OpenClaw release.
+before dispatch. The source also preserves shared host-module links during plugin capture
+and handles bundled WebAssembly and directory assets during fresh activation.
+It is not a published OpenClaw release.
 Until [OpenClaw #158724](https://github.com/openclaw/openclaw/pull/158724) or
 an equivalent implementation is available upstream, the build applies its
 `readOnlyPaths` compatibility change as
@@ -80,8 +82,8 @@ enrollment, containment, workspace access, or model execution.
 | Input                                        | Selection                                                                                                         |
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Build base                                   | `docker.io/library/node:24.22.1-bookworm@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a` |
-| OpenClaw source commit                       | `9cc4450e9d79a993a51dc6fa362468f46c6f1819`                                                                        |
-| Source archive SHA-256                       | `7ca145909cd262bec9c8e2575fc0951c9367da61691bbadc75871461a84d4752`                                                |
+| OpenClaw source commit                       | `cee236c9e9891396a7d672ab016a5e5d9d51a003`                                                                        |
+| Source archive SHA-256                       | `bdf8d13a4d2e344b5925f2c506f4aadf184796defb3d4fde4938250ae89ecfa6`                                                |
 | Dedicated Codex CLI (`OPENAI_CODEX_VERSION`) | `0.163.0-alpha.2`                                                                                                 |
 | Matrix crypto native library                 | `@matrix-org/matrix-sdk-crypto-nodejs` `v0.6.6`, SHA-256 per architecture                                         |
 
@@ -140,7 +142,7 @@ checksum-verifying download helper, and both installs read it from a loopback se
 instead of GitHub. When an OpenClaw update changes the locked
 `@matrix-org/matrix-sdk-crypto-nodejs` version, update that stage's version, URL and
 both SHA-256 values. Until then the install fails with a "no pinned file" message.
-Follow the [pinned upstream Docker assembly](https://github.com/openclaw/openclaw/blob/9cc4450e9d79a993a51dc6fa362468f46c6f1819/Dockerfile)
+Follow the [pinned upstream Docker assembly](https://github.com/openclaw/openclaw/blob/cee236c9e9891396a7d672ab016a5e5d9d51a003/Dockerfile)
 to keep plugin dependencies and runtime assets consistent. Its plugin-local
 dependency layout preserves dependencies that differ from core versions.
 Plugin chunks emitted directly under `dist` also need package-root resolution.

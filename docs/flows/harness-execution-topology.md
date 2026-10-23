@@ -224,8 +224,9 @@ early when other Work is claimable.
 On version stop, the Driver stops the Gateway within the pinned runtime's 330-second
 budget and waits for Pod disappearance before stopping the Harness, which remains
 available for active work. Idle or pre-OpenClaw shutdown (wrappers run under `tini`)
-completes promptly. Forced termination can delay the successor until the persistent
-owner lease expires.
+completes promptly. Forced termination can block the successor when OpenClaw cannot
+verify that the previous owner stopped; lease expiry alone does not permit a
+cross-namespace takeover.
 
 Both Gateway modes persist SQLite, client credentials, media, linked worktrees and common Git metadata
 on their private claim, preserving session paths across replacement. Embedded Gateways
