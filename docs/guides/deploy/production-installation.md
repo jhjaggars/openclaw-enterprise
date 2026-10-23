@@ -38,8 +38,7 @@ or build these images for your registry:
 | Controller | Root [`Dockerfile`](../../../Dockerfile), target `runtime`                                                     | API, worker, migration, and bootstrap       |
 | Runtime    | [`deploy/runtime/Dockerfile`](../../../deploy/runtime/Dockerfile), assembling pinned OpenClaw source and Codex | Gateways and Agents (one image serves both) |
 
-With Buildx and push access, set your registry, repository, and node platform.
-Use the checked-in CI base, which must match the [runtime recipe](../../../deploy/runtime/README.md).
+Select your registry, repository, and platform. Buildx uses the [runtime recipe's](../../../deploy/runtime/README.md) reviewed CI base.
 
 Authenticate the builder with `docker login <registry-host>` and approved
 credentials; for private ECR, follow [ECR authentication](eks.md#authenticate-the-image-builder-to-ecr).

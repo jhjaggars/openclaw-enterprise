@@ -80,21 +80,18 @@ so builds do not export the large intermediate cache over the network. A custom
 non-Blacksmith runner uses the GitHub Actions cache with the same scope.
 Maintainers can also dispatch `container-check.yml`, or a manual `CI` run that
 calls it, on a branch for native image verification. It has no publication job or
-package-write permission. A standalone dispatch uses the selected source's checked-in
-Images and Packaging lane base. Publication and manual `CI` supply the repository's
-approved base; publication requires that base to match the selected source's CI lane
-and runtime recipe. The build exports an OCI directory without registry publication or
-credentials.
+package-write permission. Standalone checks use the source's CI base; publication
+and manual `CI` use the approved repository base. Publication verifies it matches
+the source. Builds export OCI directories without registry credentials.
 Before Buildx runs, the workflow derives `SOURCE_DATE_EPOCH` from the exact
 source commit. BuildKit rewrites image and filesystem timestamps to that epoch,
 so wall-clock time does not change the image manifests on a cold-cache rebuild.
 
-`deploy/runtime/Dockerfile:openclaw-source` verifies the pinned OpenClaw main source archive
-and applies three patches whose hashes it verifies and records in runtime provenance:
-the stock Codex 0.163.0-alpha.2 dependency pin, before extracting frozen installation
-inputs, and temporary bridge patches for read-only paths and the native full-access
-profile. The selected source includes saved-device-credential reconnection after a
-`connect --ephemeral` setup code expires. Both installs use
+`deploy/runtime/Dockerfile:openclaw-source` verifies the OpenClaw archive, applies
+checksum-verified Codex dependency, read-only-paths, and native full-access profile
+patches, then extracts frozen installation inputs. Provenance records the patch hashes.
+The source reconnects with saved device credentials after a `connect --ephemeral`
+setup code expires. Both installs use
 frozen lockfiles and upstream's selected-plugin manifests, retaining required
 bundled plugins plus Codex and Slack. The standalone Codex command links to the
 plugin's installation. Build tools remain in full Bookworm stages; final images
@@ -238,7 +235,7 @@ owns package-write access and coordination.
 
 ## Changelog
 
-- 2026-10-23 16:52: Check standalone native builds against the selected source's CI base while preserving the approved-base publication gate; update the OpenClaw source and bridge patches for Gateway managed mode. (codex/01a1558e-c27f-7bc0-a403-af59e9364ddf)
+- 2026-10-23 16:52: Select the source's CI base for standalone checks and update OpenClaw for Gateway managed mode. (codex/01a1558e-c27f-7bc0-a403-af59e9364ddf)
 
 - 2026-10-10 03:00: Pin stock Codex 0.163.0-alpha.2; alpha.1 sent metadata the backend rejects. (fix-992-pin)
 
