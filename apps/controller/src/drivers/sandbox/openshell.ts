@@ -2021,18 +2021,10 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         "OpenShell SandboxDriver supports only dedicated Codex or OpenClaw Harness revisions.",
       );
     }
-    if (
-      this.options.gateway.workspaceMode === "managed" &&
-      context.requirements.workspaceMounts.length > 0
-    ) {
-      // Workspace mounts are Compute-owned PVCs in OCC's cluster; a managed Sandbox
-      // runs in the gateway's cluster and cannot mount them. The gateway's workspace
-      // volume backs /sandbox instead.
-      throw new SandboxRevisionUnsupportedError(
-        "SANDBOX_HARNESS_UNSUPPORTED",
-        "OpenShell managed workspace mode does not support Harness workspace mounts; the gateway's workspace volume provides /sandbox.",
-      );
-    }
+    // In managed mode, Harness workspace mounts do not become volume mounts: the
+    // revision's workspace paths are relocated under the runtime home, which the
+    // gateway's persistent workspace volume backs. The mount metadata is accepted
+    // and realized as that layout rather than rejected.
     if (
       context.revision.sandboxDriverId !== undefined &&
       context.revision.sandboxDriverId !== this.id

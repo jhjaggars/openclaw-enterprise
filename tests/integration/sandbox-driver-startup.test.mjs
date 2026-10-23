@@ -1857,13 +1857,27 @@ test("OpenShell managed mode provisions a Sandbox without OCC-owned pod infrastr
   assert.equal(await driver.harnessReady(harnessContext), false);
 });
 
-test("OpenShell managed mode refuses Harness workspace mounts", async () => {
+test("OpenShell managed mode realizes workspace mounts on the gateway volume", async () => {
   const configuration = sandboxInstallation().drivers.sandbox.configuration;
   configuration.gateway.workspaceMode = "managed";
   for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount"]) {
     delete configuration.kubernetes[key];
   }
   const gatewayClient = workspaceGatewayClient();
+  const creates = [];
+  gatewayClient.createSandbox = async (request) => {
+    creates.push(structuredClone(request));
+    return {
+      name: request.name,
+      phase: "SANDBOX_PHASE_READY",
+      serviceUrls: { "": "https://sandbox-service.example.test:9443/" },
+    };
+  };
+  gatewayClient.getService = async () => ({
+    targetPort: 8080,
+    authorizationMode: "SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH",
+    url: "https://sandbox-service.example.test:9443/",
+  });
   const driver = new OpenShellSandboxDriver(configuration, {
     id: "openshell-sandbox",
     implementation: "openshell",
@@ -1871,16 +1885,21 @@ test("OpenShell managed mode refuses Harness workspace mounts", async () => {
   });
   const fixture = codexSandboxFixture(driver);
   // The fixture's default workspace mounts are Compute-owned PVCs; a managed
-  // Sandbox cannot mount them and must fail closed rather than drop them silently.
-  await assert.rejects(
-    driver.provisionHarness({
-      ...fixture.context,
-      revision: fixture.revision,
-      requirements: fixture.requirements,
-    }),
-    /managed workspace mode does not support Harness workspace mounts/,
+  // Sandbox realizes them as the runtime-home layout on the gateway's persistent
+  // workspace volume instead of volume mounts — no PVC entries cross the boundary.
+  await driver.provisionHarness({
+    ...fixture.context,
+    revision: fixture.revision,
+    requirements: fixture.requirements,
+  });
+  const spec = creates[0].spec;
+  assert.equal(spec.template.driver_config, undefined);
+  assert.equal(
+    spec.environment.OPENCLAW_NODE_STATE_DIR,
+    "/sandbox/.openclaw-runtime/home/.openclaw-node",
   );
-  assert.deepEqual(gatewayClient.calls, []);
+  assert.equal(spec.environment.CODEX_HOME, "/sandbox/.openclaw-runtime/home/.codex");
+  assert.equal(spec.environment.OPENCLAW_WORKSPACE_DIR, "/sandbox/enterprise");
 });
 
 test("OpenShell Namespace cleanup refuses a same-name foreign Workspace", async () => {
