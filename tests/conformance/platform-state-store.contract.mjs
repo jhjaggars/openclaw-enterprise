@@ -2570,31 +2570,25 @@ async function verifyCredentialSourceContract(
     // A later update that fails after its gateway write leaves a retained Secret behind.
     await begin(transaction, firstAttempt, { api_key: recordedRef });
     // An attempt that stops before its gateway write releases only what it added, and only
-    // while it still holds the fence.
+    // while it still holds the fence. It restores the fence it replaced: the earlier update
+    // may have written the gateway and stays unresolved.
     const abandonedAttempt = randomUUID();
     await begin(transaction, abandonedAttempt, { api_key: replacementRef });
-    assert.equal(
-      await transaction.credentialSources.abandonCredentialSourceUpdate(
+    const abandon = (attemptId, release) =>
+      transaction.credentialSources.abandonCredentialSourceUpdate(
         sourceNamespace.id,
         retainingSource.id,
+        attemptId,
+        release,
         firstAttempt,
-        { api_key: [recordedRef.id] },
-      ),
-      undefined,
-    );
-    assert.deepEqual(
-      await transaction.credentialSources.abandonCredentialSourceUpdate(
-        sourceNamespace.id,
-        retainingSource.id,
-        abandonedAttempt,
-        { api_key: [replacementRef.id] },
-      ),
-      {
-        ...retainingSource,
-        secrets: { api_key: replacementRef },
-        retainedSecrets: { api_key: [recordedRef] },
-      },
-    );
+      );
+    assert.equal(await abandon(firstAttempt, { api_key: [recordedRef.id] }), undefined);
+    assert.deepEqual(await abandon(abandonedAttempt, { api_key: [replacementRef.id] }), {
+      ...retainingSource,
+      secrets: { api_key: replacementRef },
+      retainedSecrets: { api_key: [recordedRef] },
+      updateAttemptId: firstAttempt,
+    });
   });
   // Deleting the source removes its retained Secrets; they never block the deletion.
   await store.transact(async (transaction) => {

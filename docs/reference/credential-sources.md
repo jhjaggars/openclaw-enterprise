@@ -179,7 +179,8 @@ source, as for the source's current Secrets. A later update adds to this set and
 never drops a Secret from it. If a second update is recorded before the first
 reaches the gateway, only the second writes it and the first returns `409`. The
 source's next successful update, or its deletion, releases the set. A request
-that fails before its gateway write releases the Secrets it added.
+that fails before its gateway write releases the Secrets it added, unless a
+later update was recorded since.
 
 While such an update is unresolved, live adoption of the source returns `409`.
 Repeat an update without `adoption` until it succeeds, then adopt.

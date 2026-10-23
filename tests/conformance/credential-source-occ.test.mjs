@@ -1999,6 +1999,15 @@ test("a later update that stops before its gateway write never releases a Secret
     (await controller.transact((unit) => unit.secrets.listReferences(namespace.id, secret.id, 10)))
       .references;
   assert.deepEqual(await consumers(staged), []);
+  // The fence of the update that reached the gateway is restored: it is still unresolved.
+  assert.notEqual(
+    (
+      await controller.transact((unit) =>
+        unit.credentialSources.findCredentialSource(namespace.id, source.id),
+      )
+    ).updateAttemptId,
+    undefined,
+  );
 
   // Authorized again, the update to C reaches the gateway and commits: the gateway holds only
   // C now, so A and B are released.
@@ -2056,6 +2065,44 @@ test("a refresh update that stops before its gateway write lets the same token b
   const updated = await controller.updateCredentialSource(administrator, input);
   assert.deepEqual(updated.secrets, input.secrets);
   await controller.deleteSecret(administrator, namespace.id, token.id);
+});
+
+test("an update that loses its fence never releases a Secret a later update sent (finding 1398)", async () => {
+  const { controller, gateway, makeReady, modelSecret, namespace, state } = await fixture();
+  await makeReady();
+  const recorded = await modelSecret();
+  const source = await controller.createCredentialSource(administrator, {
+    namespaceId: namespace.id,
+    name: "openai",
+    type: "openai",
+    secrets: { api_key: recorded.ref },
+  });
+  const sent = await modelSecret();
+  const input = {
+    namespaceId: namespace.id,
+    credentialSourceId: source.id,
+    secrets: { api_key: sent.ref },
+  };
+  // The first request retains B, then a second request for B takes the fence, writes the
+  // gateway and fails to commit. The first stops with a stale fence: B was its addition, but
+  // the gateway now holds it.
+  afterNextCommit(state, async () => {
+    await assert.rejects(
+      controller.updateCredentialSource(administrator, input, failingAudit),
+      /audit append failed/,
+    );
+  });
+  await assert.rejects(
+    controller.updateCredentialSource(administrator, input),
+    (error) =>
+      error instanceof ResourceConflictError &&
+      error.message === "The credential source changed during the update.",
+  );
+  assert.equal(gateway.calls.filter(({ operation }) => operation === "updateSource").length, 1);
+  await assert.rejects(
+    controller.deleteSecret(administrator, namespace.id, sent.id),
+    referencedBy(source.id),
+  );
 });
 
 test("of two overlapping updates only the later staged one writes the gateway", async () => {
@@ -2137,6 +2184,11 @@ for (const [failure, gatewayOptions] of [
         .filter(({ resource }) => resource.id === source.id)
         .map(({ outcome, reasonCode }) => [outcome, reasonCode]),
       [["failure", "CREDENTIAL_GATEWAY_UPDATE_FAILED"]],
+    );
+    // The gateway may have applied the replacement, so it stays retained.
+    await assert.rejects(
+      controller.deleteSecret(administrator, namespace.id, replacement.id),
+      referencedBy(source.id),
     );
   });
 }

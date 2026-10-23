@@ -214,11 +214,11 @@ ownership and nonempty values because `UpdateProvider` merges credentials.
 Only subsequently started processes receive the update.
 
 It also retains each replacement (`credential_source_retained_secrets`, a
-consumer) and sets `update_attempt_id`. A second requires that fence, writes the
-gateway, commits references, clears both, audits. Failing earlier releases its
-own additions; a failed commit or crash releases nothing. Adoption meanwhile
-returns `409`; an absent/failed source, `503`. Refresh updates use the
-[Refresh Driver](credential-source-refresh.md#4-update-and-rotation).
+consumer), setting `update_attempt_id`. A second requires that fence, writes the
+gateway, commits references, clears both, audits. Failing earlier while still
+fenced releases its own additions; commit failures or crashes release nothing.
+Adoption meanwhile returns `409`; an absent/failed source, `503`. Refresh
+updates use the [Refresh Driver](credential-source-refresh.md#4-update-and-rotation).
 
 ### 9. Withdraw a source from an Agent
 

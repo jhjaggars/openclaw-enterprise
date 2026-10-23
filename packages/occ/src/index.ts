@@ -6020,8 +6020,8 @@ export class OpenClawController {
    *   issuer. It repeats the Secret reads, since authorization or a value may have changed. It
    *   then commits the references, removes the retained Secrets and the fence, and appends
    *   `audit` together. If it fails before its gateway write begins, a separate transaction
-   *   releases the Secrets this attempt alone added and the fence, unless another attempt took
-   *   the fence; a crash or an unknown commit outcome leaves them retained.
+   *   releases the Secrets this attempt alone added and restores the previous fence, unless
+   *   another attempt took the fence; a crash or an unknown commit outcome leaves them retained.
    *
    * A failed commit leaves the gateway newer, and repeating the same request converges. Running
    * Harness processes keep the previous value. `failureAudit` builds the event committed on its
@@ -6099,7 +6099,7 @@ export class OpenClawController {
       ) {
         throw new ResourceStateConflictError("The credential source changed during the update.");
       }
-      return { added };
+      return { added, previousAttemptId: source.updateAttemptId };
     });
     if ("admitted" in staged) {
       return staged.admitted;
@@ -6117,6 +6117,7 @@ export class OpenClawController {
               input.credentialSourceId,
               attemptId,
               staged.added,
+              staged.previousAttemptId,
             ),
           );
         } catch {
@@ -6129,6 +6130,15 @@ export class OpenClawController {
       // Adoption is refused while the fence is set; this keeps a protected source unwritten.
       if (source.updateAttemptId !== attemptId || source.egress !== undefined) {
         throw new ResourceStateConflictError("The credential source changed during the update.");
+      }
+      // The gateway may receive only a recorded or retained Secret, so each stays a consumer.
+      for (const [field, reference] of Object.entries(secretRefs)) {
+        if (
+          reference.id !== source.secrets[field]?.id &&
+          !(source.retainedSecrets?.[field] ?? []).some(({ id }) => id === reference.id)
+        ) {
+          throw new ResourceStateConflictError("The credential source changed during the update.");
+        }
       }
       const values = await this.readCredentialSourceSecrets(
         state,

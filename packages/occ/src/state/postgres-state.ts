@@ -2717,13 +2717,27 @@ export class PostgresPlatformState implements PlatformStateStore {
       credentialSourceId: string,
       lock = false,
     ): Promise<Readonly<CredentialSource> | undefined> => {
+      if (lock) {
+        // Lock first, then read in a new statement: under READ COMMITTED, a statement that
+        // waited for the lock re-reads only the locked row, so its Secret subqueries would
+        // still show references a transaction committed while it waited had replaced.
+        const locked = await client.query(
+          `SELECT 1 FROM occ.credential_sources AS cs
+           JOIN occ.namespaces AS n ON n.id = cs.namespace_id AND n.deleted_at IS NULL
+           WHERE cs.namespace_id = $1 AND cs.id = $2 FOR UPDATE OF cs`,
+          [namespaceId, credentialSourceId],
+        );
+        if (locked.rowCount !== 1) {
+          return undefined;
+        }
+      }
       const found = rows(
         (
           await client.query(
             `SELECT ${CREDENTIAL_SOURCE_COLUMNS}
              FROM occ.credential_sources AS cs
              JOIN occ.namespaces AS n ON n.id = cs.namespace_id AND n.deleted_at IS NULL
-             WHERE cs.namespace_id = $1 AND cs.id = $2${lock ? " FOR UPDATE OF cs" : ""}`,
+             WHERE cs.namespace_id = $1 AND cs.id = $2`,
             [namespaceId, credentialSourceId],
           )
         ).rows,
@@ -3103,11 +3117,12 @@ export class PostgresPlatformState implements PlatformStateStore {
         credentialSourceId,
         attemptId,
         release,
+        previousAttemptId,
       ) => {
         const abandoned = await client.query(
-          `UPDATE occ.credential_sources SET update_attempt_id = NULL
+          `UPDATE occ.credential_sources SET update_attempt_id = $4
            WHERE namespace_id = $1 AND id = $2 AND update_attempt_id = $3`,
-          [namespaceId, credentialSourceId, attemptId],
+          [namespaceId, credentialSourceId, attemptId, previousAttemptId ?? null],
         );
         if (abandoned.rowCount !== 1) {
           return undefined;

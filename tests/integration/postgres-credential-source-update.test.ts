@@ -40,7 +40,7 @@ function recordingGateway() {
   const providers = new Map<string, Provider>();
   const profiles = new Map<string, { id: string }>();
   const writes: string[] = [];
-  const hooks: { afterWrite?: (() => void) | undefined } = {};
+  const hooks: { afterWrite?: (() => void | Promise<void>) | undefined } = {};
   const key = (workspace: string, name: string) => `${workspace}/${name}`;
   const client = {
     async getProviderProfile(workspace: string, id: string) {
@@ -80,7 +80,7 @@ function recordingGateway() {
       writes.push(Object.values(credentials).join(","));
       const afterWrite = hooks.afterWrite;
       hooks.afterWrite = undefined;
-      afterWrite?.();
+      await afterWrite?.();
     },
     close() {},
   };
@@ -299,5 +299,64 @@ test(
     assert.equal(gateway.writes.length, 2);
     assert.equal((await second.request("DELETE", secretPath(recorded))).status, 204);
     assert.equal((await second.request("DELETE", secretPath(sent))).status, 409);
+  },
+);
+
+test(
+  "an update that waited for the source lock retains a Secret the record no longer names (finding 1398)",
+  { ...requiresPostgres, timeout: 120_000 },
+  async (t) => {
+    const proxy = await commitAckProxy(databaseUrl);
+    t.after(() => proxy.close());
+    const gateway = recordingGateway();
+    const secretDriver = createTestSecretDriver({ id: "credential-update-pg-secret" });
+    const f = await controllerProcess(t, gateway, secretDriver, proxy.url);
+    const { recorded, createSecret, sourcePath, secretPath } = await seedSource(f);
+    const replacement = await createSecret("replacement");
+
+    // While the update to B holds the source lock for its gateway write, a request naming A
+    // explicitly waits for that lock. Once B commits, A is no longer recorded, so the waiting
+    // request must read B and retain A before it sends A to the gateway. The test starts that
+    // request itself, outside the update's transaction context.
+    let reachedGateway = () => {};
+    const atGateway = new Promise<void>((resolve) => (reachedGateway = resolve));
+    let resume = () => {};
+    const resumed = new Promise<void>((resolve) => (resume = resolve));
+    gateway.hooks.afterWrite = async () => {
+      // The resend writes A; its success COMMIT then never reaches PostgreSQL.
+      gateway.hooks.afterWrite = () => proxy.arm({ pauseCommit: true });
+      reachedGateway();
+      await resumed;
+    };
+    const update = f.request("PATCH", sourcePath, { secrets: { api_key: replacement.ref } });
+    await atGateway;
+    const resend = f.request("PATCH", sourcePath, { secrets: { api_key: recorded.ref } });
+    await waitFor("the request for A to wait for the source lock", async () =>
+      (
+        await f.pool.query(
+          `SELECT 1 FROM pg_locks AS l JOIN pg_stat_activity AS a ON a.pid = l.pid
+           WHERE NOT l.granted AND a.datname = current_database()`,
+        )
+      ).rowCount === 0
+        ? undefined
+        : true,
+    );
+    resume();
+    const updated = await update;
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    await waitFor("the resend's success COMMIT to pause", () =>
+      proxy.commitPaused ? true : undefined,
+    );
+    proxy.dropPausedCommit();
+    const lost = await resend;
+    assert.equal(lost.status, 503, JSON.stringify(lost.body));
+    assert.equal(gateway.writes.length, 2);
+    assert.equal(gateway.held(), secretDriver.valueFor(recorded));
+    assert.deepEqual((await f.request("GET", sourcePath)).body.data.secrets, {
+      api_key: replacement.ref,
+    });
+    // The gateway holds A although the record names B, so neither can be deleted.
+    assert.equal((await f.request("DELETE", secretPath(recorded))).status, 409);
+    assert.equal((await f.request("DELETE", secretPath(replacement))).status, 409);
   },
 );

@@ -476,14 +476,17 @@ export interface CredentialSourceRepository extends CredentialSourceReadReposito
   ): Promise<Readonly<CredentialSource> | undefined>;
   /**
    * Ends the update `attemptId` that failed before any gateway write: removes only the
-   * retained Secrets it added (`release`, by field) and the fence. Returns `undefined` when
-   * the source is missing or another attempt holds the fence, whose update may rely on them.
+   * retained Secrets it added (`release`, by field) and restores the fence it replaced
+   * (`previousAttemptId`, which an unresolved earlier update may have left). Returns
+   * `undefined` when the source is missing or another attempt holds the fence, whose update
+   * may rely on them.
    */
   abandonCredentialSourceUpdate(
     namespaceId: string,
     credentialSourceId: string,
     attemptId: string,
     release: Readonly<Record<string, readonly string[]>>,
+    previousAttemptId: string | undefined,
   ): Promise<Readonly<CredentialSource> | undefined>;
   /** Moves a registering source to `ready` once the gateway confirms its copy. */
   markCredentialSourceReady(
@@ -2395,7 +2398,13 @@ function repositories(
       snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
       return saved;
     },
-    abandonCredentialSourceUpdate: async (namespaceId, credentialSourceId, attemptId, release) => {
+    abandonCredentialSourceUpdate: async (
+      namespaceId,
+      credentialSourceId,
+      attemptId,
+      release,
+      previousAttemptId,
+    ) => {
       const current = await findCredentialSource(namespaceId, credentialSourceId);
       if (current === undefined || current.updateAttemptId !== attemptId) {
         return undefined;
@@ -2410,6 +2419,7 @@ function repositories(
       const { retainedSecrets: _retained, updateAttemptId: _attempt, ...rest } = current;
       const saved = immutableCopy({
         ...rest,
+        ...(previousAttemptId === undefined ? {} : { updateAttemptId: previousAttemptId }),
         ...(Object.keys(retained).length === 0 ? {} : { retainedSecrets: retained }),
       });
       snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
