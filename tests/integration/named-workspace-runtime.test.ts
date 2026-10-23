@@ -432,6 +432,25 @@ test(
     );
     await writeFile(tokenPath, expectedGatewayToken, { mode: 0o600 });
     assert.equal(await gated.startupDependency.check(AbortSignal.timeout(2000)), "ready");
+    for (const scheme of ["HTTPS", "hTtPs"]) {
+      Object.assign(configuration.backend[0]!.configuration, {
+        endpoint: `${scheme}://localhost:${port}`,
+      });
+      const { startupDependency } = await load({ ...selected, startupCycle: "gateway-readiness" });
+      assert.ok(startupDependency);
+      const before = healthCalls;
+      assert.equal(await startupDependency.check(AbortSignal.timeout(2000)), "ready");
+      assert.equal(healthCalls, before + 1);
+    }
+    // A bare address is valid for the Backend, but cannot satisfy this TLS startup gate.
+    Object.assign(configuration.backend[0]!.configuration, {
+      endpoint: "[::1]:443",
+      insecureTransport: "network-policy",
+    });
+    await assert.rejects(
+      load({ ...selected, startupCycle: "gateway-readiness" }),
+      /authenticated TLS gateway readiness check/,
+    );
     const queue = new PostgresWorkQueue(fixture.observerPool, {
       leaseDurationMs: 100,
       maxAttempts: 2,

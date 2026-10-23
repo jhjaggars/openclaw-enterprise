@@ -1243,8 +1243,8 @@ export async function loadInstallationConfiguration(options: {
   let startupDependency: WorkerStartupDependency | undefined;
   if (namedWorkspace?.startupCycle === "gateway-readiness") {
     if (
-      !openShellBackend?.configuration.endpoint?.startsWith("https://") ||
-      !["bearerTokenFile", "mtls"].includes(openShellBackend.configuration.auth?.mode ?? "") ||
+      !/^https:\/\//i.test(openShellBackend?.configuration.endpoint ?? "") ||
+      !["bearerTokenFile", "mtls"].includes(openShellBackend?.configuration.auth?.mode ?? "") ||
       !sandboxDriver ||
       !("checkStartupDependency" in sandboxDriver) ||
       typeof sandboxDriver.checkStartupDependency !== "function"

@@ -116,6 +116,12 @@ test("named runtime Helm install and upgrade preserve identity and Git-disabled 
         JSON.parse(env.find((e) => e.name === "OCC_NAMED_WORKSPACE")!.value),
         binding,
       );
+      for (const name of ["OCC_EGRESS_AUTHORITY_PORT", "OCC_OPENSHELL_GIT_PORT"]) {
+        assert.deepEqual(
+          env.filter((entry) => entry.name === name),
+          [{ name, value: "disabled" }],
+        );
+      }
     }
     assert.deepEqual(
       objects.find((o) => o.metadata.name === "openclaw-enterprise-api-github-login-egress")!.spec
