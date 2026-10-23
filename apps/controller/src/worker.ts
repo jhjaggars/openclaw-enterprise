@@ -228,8 +228,14 @@ function revisionFailureLogFields(error: unknown): {
   const errorClass = name ?? "Error";
   // Kubernetes SDK errors carry the HTTP status in `code`.
   const status = loggedHttpStatus(record);
+  const detail =
+    record !== undefined &&
+    typeof (record as { readonly message?: unknown }).message === "string" &&
+    (record as { readonly message: string }).message.length > 0
+      ? { reason: (record as { readonly message: string }).message.slice(0, 200) }
+      : {};
   if (status !== undefined) {
-    return { cause: errorClass, status };
+    return { cause: errorClass, status, ...detail };
   }
   return record === undefined
     ? { cause: errorClass }
@@ -1600,7 +1606,13 @@ export class ControllerWorker {
       if (error instanceof WorkClaimLostError) {
         throw error;
       }
-      result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+      result = {
+        outcome: "retry",
+        code: "DEPENDENCY_UNAVAILABLE",
+        ...(error instanceof Error && error.message
+          ? { message: error.message.slice(0, 200) }
+          : {}),
+      };
     }
     await this.finalize(claim, namespace, result);
   }
@@ -1783,7 +1795,13 @@ export class ControllerWorker {
       if (error instanceof WorkClaimLostError) {
         throw error;
       }
-      result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+      result = {
+        outcome: "retry",
+        code: "DEPENDENCY_UNAVAILABLE",
+        ...(error instanceof Error && error.message
+          ? { message: error.message.slice(0, 200) }
+          : {}),
+      };
     }
     await this.finalizeAgentStop(claim, result);
   }
@@ -1956,7 +1974,13 @@ export class ControllerWorker {
       if (error instanceof WorkClaimLostError) {
         throw error;
       }
-      result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+      result = {
+        outcome: "retry",
+        code: "DEPENDENCY_UNAVAILABLE",
+        ...(error instanceof Error && error.message
+          ? { message: error.message.slice(0, 200) }
+          : {}),
+      };
     }
     await this.finalizeAgentDeletion(claim, result);
   }
@@ -2869,7 +2893,13 @@ export class ControllerWorker {
         // that is converging under load comes back (D28).
         result = { outcome: "pending", code: error.code, dependencyFailure: error };
       } else {
-        result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
+        result = {
+          outcome: "retry",
+          code: "DEPENDENCY_UNAVAILABLE",
+          ...(error instanceof Error && error.message
+            ? { message: error.message.slice(0, 200) }
+            : {}),
+        };
       }
       failureLogFields = revisionFailureLogFields(error);
     }
