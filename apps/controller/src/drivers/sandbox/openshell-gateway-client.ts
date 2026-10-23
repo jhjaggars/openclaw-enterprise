@@ -19,6 +19,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Client, ClientUnaryCall, Metadata, ServiceClientConstructor } from "@grpc/grpc-js";
 import type { PackageDefinition } from "@grpc/proto-loader";
+import { OpenShellOidcTokenSource } from "./openshell-oidc-token.ts";
 
 export {
   OpenShellAdmissionLimitError,
@@ -34,7 +35,16 @@ export interface OpenShellGatewayClientOptions {
   readonly endpoint: string;
   readonly auth?:
     | { readonly mode: "unauthenticated" }
-    | { readonly mode: "bearerTokenFile"; readonly path: string };
+    | { readonly mode: "bearerTokenFile"; readonly path: string }
+    | {
+        readonly mode: "oidcClientCredentials";
+        readonly tokenUrl: string;
+        readonly clientId: string;
+        readonly clientSecretPath: string;
+        readonly tokenAuth?: "client_secret_post" | "client_secret_basic";
+        readonly audience?: string;
+        readonly scope?: string;
+      };
   readonly requestTimeoutMs?: number;
   readonly rootCertificatePath?: string;
 }
@@ -695,9 +705,17 @@ function metadataValue(token: string): string {
 async function metadata(
   grpc: typeof import("@grpc/grpc-js"),
   auth: OpenShellGatewayClientOptions["auth"],
+  oidc: OpenShellOidcTokenSource | undefined,
 ): Promise<Metadata> {
   const value = new grpc.Metadata();
   if (auth === undefined || auth.mode === "unauthenticated") {
+    return value;
+  }
+  if (auth.mode === "oidcClientCredentials") {
+    if (oidc === undefined) {
+      throw new OpenShellGatewayFailure("OpenShell OIDC token source is unavailable.");
+    }
+    value.set("authorization", `Bearer ${await oidc.accessToken()}`);
     return value;
   }
   if (!isAbsolute(auth.path)) {
@@ -726,6 +744,7 @@ async function loadGrpc(): Promise<{
 export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
   private readonly options: OpenShellGatewayClientOptions;
   private readonly requestTimeoutMs: number;
+  private readonly oidc: OpenShellOidcTokenSource | undefined;
   private client:
     | Promise<{
         readonly grpc: typeof import("@grpc/grpc-js");
@@ -741,6 +760,17 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     }
     if (options.auth?.mode === "bearerTokenFile" && !isAbsolute(options.auth.path)) {
       throw new OpenShellGatewayFailure("OpenShell bearer token file path must be absolute.");
+    }
+    if (options.auth?.mode === "oidcClientCredentials") {
+      this.oidc = new OpenShellOidcTokenSource({
+        tokenUrl: options.auth.tokenUrl,
+        clientId: options.auth.clientId,
+        clientSecretPath: options.auth.clientSecretPath,
+        ...(options.auth.tokenAuth === undefined ? {} : { tokenAuth: options.auth.tokenAuth }),
+        ...(options.auth.audience === undefined ? {} : { audience: options.auth.audience }),
+        ...(options.auth.scope === undefined ? {} : { scope: options.auth.scope }),
+        requestTimeoutMs: this.requestTimeoutMs,
+      });
     }
     if (options.rootCertificatePath !== undefined && !isAbsolute(options.rootCertificatePath)) {
       throw new OpenShellGatewayFailure("OpenShell root certificate path must be absolute.");
@@ -1362,7 +1392,7 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     signal.throwIfAborted();
     const { grpc, client } = await this.ensureClient();
     signal.throwIfAborted();
-    const headers = await metadata(grpc, this.options.auth);
+    const headers = await metadata(grpc, this.options.auth, this.oidc);
     signal.throwIfAborted();
     return new Promise<RecordValue>((resolve, reject) => {
       let call: ClientUnaryCall | undefined;

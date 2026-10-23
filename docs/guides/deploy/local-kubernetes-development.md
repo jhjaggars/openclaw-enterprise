@@ -146,6 +146,10 @@ set
 `OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART`, and
 `OCC_DEVELOPMENT_OPENSHELL_AGENT_SANDBOX_MANIFEST` to absolute paths.
 
+To run the profile against a gateway you already operate with OIDC
+client-credentials authentication instead of the pinned in-cluster gateway,
+see [Use an external OpenShell gateway](external-openshell-gateway.md).
+
 To choose the host engine explicitly:
 
 ```bash

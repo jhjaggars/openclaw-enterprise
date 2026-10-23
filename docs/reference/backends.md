@@ -135,6 +135,20 @@ backend:
       credential_gateway: openshell-credentials
 ```
 
+A gateway that validates OIDC bearer tokens instead accepts a
+client-credentials grant:
+
+```yaml
+auth:
+  mode: oidcClientCredentials
+  tokenUrl: https://idp.example.com/realms/openshell/protocol/openid-connect/token
+  clientId: occ-openshell
+  clientSecretPath: /etc/openclaw/openshell/client-secret
+  tokenAuth: client_secret_post # or client_secret_basic; post is the default
+  audience: openshell-cli # the gateway's expected audience, not the client ID
+  scope: openshell:gateway # optional
+```
+
 Its closed `configuration` accepts:
 
 - `endpoint`: `host:port`, or an `http` or `https` origin without credentials,
@@ -143,16 +157,27 @@ Its closed `configuration` accepts:
   name is used as-is; a bare name resolves in each tenant namespace. `port`
   defaults to `8080`, and `scheme` defaults to `https` only when
   `rootCertificatePath` is set.
-- `auth`: `{ mode: unauthenticated }` or `{ mode: bearerTokenFile, path }` with
-  an absolute path.
+- `auth`: one of
+  - `{ mode: unauthenticated }`, development only with
+    `insecureTransport: network-policy`;
+  - `{ mode: bearerTokenFile, path }` with an absolute path; or
+  - `{ mode: oidcClientCredentials, ... }` with `tokenUrl` (an absolute `https`
+    URL without credentials, query, or fragment; `http` only to a numeric
+    loopback address), `clientId`, `clientSecretPath` (absolute), optional
+    `tokenAuth` (`client_secret_post` default or `client_secret_basic`), and
+    optional `audience` and `scope` request parameters. The client exchanges the
+    credentials at `tokenUrl`, caches the access token until a refresh margin
+    before its reported expiry, re-reads the secret file on every refresh, and
+    presents the token as the gRPC `authorization` bearer. `audience` must match
+    the gateway's expected audience, not the client ID.
 - `requestTimeoutMs`: the per-call deadline, from 1000 to 30000 ms. The bound
   limits how late a timed-out credential registration can land.
 - `rootCertificatePath`: an absolute path to the gateway CA.
 - `insecureTransport: network-policy`: required when the connection lacks TLS or
-  bearer-token authentication, and rejected otherwise. It declares that
-  NetworkPolicy restricts the gateway to the OCE API, worker, and OpenShell
-  supervisors. Credential registration sends resolved values over this
-  connection, and OCC cannot verify the NetworkPolicy itself.
+  authentication, and rejected otherwise. It declares that NetworkPolicy
+  restricts the gateway to the OCE API, worker, and OpenShell supervisors.
+  Credential registration sends resolved values over this connection, and OCC
+  cannot verify the NetworkPolicy itself.
 
 Either `endpoint` or `serviceName` is required. Both `drivers.sandbox` and
 `drivers.credential_gateway` are required and must match the selected bundled
@@ -160,7 +185,8 @@ Either `endpoint` or `serviceName` is required. Both `drivers.sandbox` and
 [OpenShell Credential Gateway](drivers/openshell-credential-gateway.md). One
 OpenShell Backend is supported. Composition builds one gateway client object
 and injects it into both members, which cache one client per resolved endpoint.
-The API and the worker each construct it, so both need the token file and gateway access.
+The API and the worker each construct it, so both need the client secret or token
+file and gateway access.
 
 ## Driver and client contract
 

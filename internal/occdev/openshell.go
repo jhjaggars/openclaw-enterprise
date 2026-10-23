@@ -138,6 +138,11 @@ func (r *runner) prepareOpenShell(ctx context.Context, state *developmentState, 
 		{"sandbox", openShellSandboxImage, &assets.sandboxImage},
 		{"supervisor", openShellSupervisorImage, &assets.supervisorImage},
 	} {
+		// An external gateway brings its own images; this checkout supplies only the
+		// workspace chart, admission configuration, and RuntimeClass.
+		if state.openShellExternal != nil {
+			break
+		}
 		imported, err := r.importOpenShellImage(ctx, state, root, selected.component, selected.source)
 		if err != nil {
 			return nil, err

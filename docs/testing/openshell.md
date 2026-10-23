@@ -31,6 +31,13 @@ unknown outcome. Its disposable kubelet retains the imported immutable
 OpenShell images until teardown because later revisions cannot pull them. No
 model credential is needed for environment startup.
 
+To point the profile at a gateway you already operate with OIDC
+client-credentials authentication instead of installing the pinned in-cluster
+gateway, see
+[Use an external OpenShell gateway](../guides/deploy/external-openshell-gateway.md).
+That selection skips the in-cluster gateway and its images; the remaining
+OpenShell proofs below run against the profile's own gateway.
+
 Stop the reusable environment before proving the setup and cleanup lifecycle in
 a separate fresh cluster:
 

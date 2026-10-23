@@ -876,6 +876,7 @@
               "guides/deploy/local-repository-credentials",
               "guides/deploy/local-compose-kubernetes",
               "guides/deploy/openshell-credential-sources",
+              "guides/deploy/external-openshell-gateway",
               "reference/settings/development",
               "design/resources",
               "design/access",

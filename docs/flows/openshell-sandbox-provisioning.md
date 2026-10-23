@@ -1,7 +1,7 @@
 ---
 created: "2026-09-21"
-updated: 2026-10-05
-last_updated_session: authoring-run/4f3e6ccd-a967-48c8-9d5d-f29a6d338d7d
+updated: 2026-10-22
+last_updated_session: authoring-run/openshell-external-gateway-oidc
 ---
 
 # OpenShell Sandbox provisioning flow
@@ -129,12 +129,11 @@ HTTP Host remains the OpenShell routing key. The corresponding NetworkPolicy
 allows that Gateway only to the selected OpenShell Gateway Pods and port.
 
 The default Compose profile runs PostgreSQL and OCC in Compose while its worker
-targets k3d. Kubernetes-only runs those components in `oce-system` with
-in-cluster authentication. Both install private Envoy routing and operator
-Workspace resources, and restrict OpenShell Gateway access to the API, worker,
-supervisor callbacks, and dedicated Agent Gateways. See
-the [local deployment guides](../guides/deploy/local-kubernetes-development.md)
-for startup, RBAC, image, and cleanup details.
+targets k3d; Kubernetes-only runs those components in `oce-system` with
+in-cluster authentication. See the
+[local deployment guides](../guides/deploy/local-kubernetes-development.md)
+and the [external-gateway selection](../guides/deploy/external-openshell-gateway.md)
+for routing, RBAC, image, and cleanup details.
 
 Cleanup validates the recorded engine and state before deleting the named
 cluster and, in Compose mode, the recorded project and volumes. Partial cleanup
@@ -276,6 +275,13 @@ Cancellation is checked after setup and before dispatch; after dispatch it
 cancels the local gRPC call without proving the remote mutation stopped. The
 lifecycle therefore recovers uncertain effects through adoption and cleanup.
 
+Each call attaches the Backend's authentication to the gRPC `authorization`
+metadata: `bearerTokenFile` reads the token file per call;
+`oidcClientCredentials` exchanges the client ID and re-read secret at the token
+URL (`apps/controller/src/drivers/sandbox/openshell-oidc-token.ts`), caches
+the token until before expiry, and presents it as the bearer;
+token-endpoint failures fail the call.
+
 `GetService` retains two forms of the URL. The normalized form preserves the
 existing control-endpoint behavior used by local clients. The advertised form
 preserves OpenShell's hostname and port for workload transport. The Sandbox
@@ -355,6 +361,7 @@ networking. Native OpenClaw remains a separate verification-only path.
 
 - [OpenShell Sandbox Driver](../reference/drivers/openshell-sandbox.md) and [OpenShell Credential Gateway](../reference/drivers/openshell-credential-gateway.md)
 - [Credential source lifecycle](credential-source-lifecycle.md)
+- [OpenShell Backend](../reference/backends.md#openshell-gateway)
 - [OpenShell tests](../testing/openshell.md)
 - [Kubernetes Compute Driver](../reference/drivers/kubernetes-compute.md)
 - [Harness execution topology](harness-execution-topology.md)
@@ -365,9 +372,7 @@ networking. Native OpenClaw remains a separate verification-only path.
 
 ## Changelog
 
-- 2026-10-05 16:17: Documented version-fenced workspace-node setup renewal through the revision provider and supervisor refresh. (authoring-run/4f3e6ccd-a967-48c8-9d5d-f29a6d338d7d - fd9a082e2587432bde6282748a82e3025a64fd1a)
-
-- 2026-10-05 12:50: Removed repeated setup and wire-contract detail while preserving the current OpenShell provisioning sequence and moved older entries to the history page. (authoring-run/fd7f6cdb-1d1d-40d5-8d4a-d6d80cd946e7 - 4b5afe0cb653f7dd99fccdb2e3432cbf60e6a03e)
+- 2026-10-22 21:40: Documented OIDC client-credentials Backend authentication and external-gateway selection. (authoring-run/openshell-external-gateway-oidc - bb7d2a11004190ace8b7a643c0d1b7769cd8f16c)
 
 - 2026-10-02 16:26: Passed OpenShell's provider-local workspace root to the dedicated Gateway while preserving the canonical Kubernetes Harness root. (authoring-run/3bf937d5-c422-419e-af2d-754abe024ca4 - 987c8c2b4ace1e152262ef6920b6d0f9ff26a086)
 

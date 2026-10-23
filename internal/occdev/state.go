@@ -40,6 +40,9 @@ type developmentState struct {
 	KeyPath           string `json:"keyPath"`
 	KeyOwned          bool   `json:"keyOwned"`
 	directory         string
+	// openShellExternal replaces the pinned in-cluster gateway with an operator's
+	// external gateway; it is transient and re-read from the environment on each start.
+	openShellExternal *externalOpenShell
 }
 
 func (s *developmentState) composeCommand() []string {
