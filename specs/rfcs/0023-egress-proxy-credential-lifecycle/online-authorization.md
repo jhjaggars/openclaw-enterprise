@@ -91,6 +91,19 @@ First qualify a released OpenShell without patches. If the gap is proving that a
 is mandatory and applied, ask upstream for that narrow capability. Do not paper over a
 missing enforcement boundary with a successful request or a configuration write.
 
+## Codex workspace access tokens
+
+A protected sender for a dedicated Codex Agent uses the existing `codex-pat` Credential Source and `codex_pat` login mode. The workload uses a nonsecret marker. The credential owner and trusted sender hold the reusable workspace token.
+
+Classify workspace bootstrap separately from model generation. Identity discovery is `GET https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami`. Validate the returned account and backend origin against the admitted workspace before using them. On the admitted ChatGPT origin, qualify the exact reads the native client needs:
+
+- `GET /backend-api/wham/accounts/check`, `/backend-api/wham/config/bundle` and `/backend-api/wham/settings/user` for workspace metadata.
+- `GET /backend-api/codex/models` for model discovery, with only the qualified client's `client_version` query.
+
+The model turn uses `POST /backend-api/codex/responses` for the admitted model. Each credential release binds the current grant, execution, workspace, operation and verified HTTPS origin. The issuer checks the grant again at release. Refuse unlisted reads, substituted destinations or workspaces, and unsupported transports before releasing the token. Qualify additional routes individually.
+
+Exercise the shipped Codex client and selected sender against controlled HTTPS peers. Verify a full turn, marker-only Agent custody and denial of an unlisted GET on the correct host. Hold a request after its initial allow, withdraw the still-valid token's grant, then resume it. Neither that request nor a fresh one may reach the peer, and Git must still fetch. Withdraw Git separately and complete another model turn in the same conversation. A request whose credential was already released may finish.
+
 ## Release test
 
 From a clean OCE checkout, use the published OpenShell image, an ordinary client and a
