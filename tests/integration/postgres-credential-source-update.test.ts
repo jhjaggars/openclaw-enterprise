@@ -139,6 +139,8 @@ async function controllerProcess(
     sandboxDriver: undefined,
     stateOptions: undefined,
   });
+  // As the production pool does: an idle connection the proxy closes is discarded, not thrown.
+  p.pool.on("error", () => {});
   // The JavaScript test doubles carry no Driver types.
   p.controller.registerDriver(computeDriver as never);
   p.controller.selectDriver("compute", computeDriver.id);
@@ -198,10 +200,11 @@ test(
   { ...requiresPostgres, timeout: 120_000 },
   async (t) => {
     const proxy = await commitAckProxy(databaseUrl);
-    t.after(() => proxy.close());
     const gateway = recordingGateway();
     const secretDriver = createTestSecretDriver({ id: "credential-update-pg-secret" });
     const f = await controllerProcess(t, gateway, secretDriver, proxy.url);
+    // After hooks run in order: the pool ends before the proxy closes its connections.
+    t.after(() => proxy.close());
     const { namespace, recorded, createSecret, sourcePath, sourceId, secretPath } =
       await seedSource(f);
 
@@ -307,10 +310,11 @@ test(
   { ...requiresPostgres, timeout: 120_000 },
   async (t) => {
     const proxy = await commitAckProxy(databaseUrl);
-    t.after(() => proxy.close());
     const gateway = recordingGateway();
     const secretDriver = createTestSecretDriver({ id: "credential-update-pg-secret" });
     const f = await controllerProcess(t, gateway, secretDriver, proxy.url);
+    // After hooks run in order: the pool ends before the proxy closes its connections.
+    t.after(() => proxy.close());
     const { recorded, createSecret, sourcePath, secretPath } = await seedSource(f);
     const replacement = await createSecret("replacement");
 
