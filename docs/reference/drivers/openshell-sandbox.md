@@ -156,7 +156,15 @@ the 30-second `startupDelayMs`.
 
 Install OpenShell's gateway separately. Required `gateway.workspaceMode`
 accepts `operator` or `managed`; deferred managed mode fails before Kubernetes
-mutations or Gateway calls. Configure the Gateway's Kubernetes driver with `workspaceMode: operator`, a
+mutations or Gateway calls. In `managed` mode the gateway owns every
+sandbox-side Kubernetes object: the namespace behind each Workspace, the
+sandbox ServiceAccount, and the workspace volume backing `/sandbox`. OCC
+reconciles the Workspace over the gateway RPC only, holds no sandbox-cluster
+kubeconfig, and rejects the operator workspace and Pod-infrastructure options.
+The sandbox spec sends only the workload, with no driver-config mount under
+`/sandbox`, and Harness workspace mounts are refused. See
+[Use an external OpenShell gateway](../../guides/deploy/external-openshell-gateway.md).
+Configure the Gateway's Kubernetes driver with `workspaceMode: operator`, a
 namespace selector matching `operatorNamespaceLabels`, and `allowed_pod_labels`
 listing `openclaw.dev/*`, `app.kubernetes.io/name`, and
 `app.kubernetes.io/managed-by`; it rejects other labels. An OpenShell Workspace

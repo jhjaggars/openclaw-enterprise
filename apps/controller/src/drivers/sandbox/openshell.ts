@@ -182,15 +182,19 @@ export interface OpenShellSandboxDriverOptions {
     readonly networkPolicyResources?: readonly KubernetesNamespacedResource[];
   };
   readonly kubernetes: {
-    readonly runtimeClassName: string;
-    readonly serviceAccount: { readonly mode: "gatewayConfigured" };
-    readonly sandboxDataMount: {
+    /** Operator mode only; the gateway's default applies in managed mode. */
+    readonly runtimeClassName?: string;
+    /** Operator mode only; the gateway configures the sandbox ServiceAccount in managed mode. */
+    readonly serviceAccount?: { readonly mode: "gatewayConfigured" };
+    /** Operator mode only; the gateway's workspace volume backs /sandbox in managed mode. */
+    readonly sandboxDataMount?: {
       readonly claimName?: string;
       readonly subPath: string;
       readonly mountPath: string;
       readonly readOnly: boolean;
     };
     readonly agentResources?: ConfigurationRecord;
+    /** Operator mode only; the gateway decides user-namespace support in managed mode. */
     readonly userNamespaces?: boolean;
   };
   readonly policy: {
@@ -1751,7 +1755,7 @@ async function prepareNativeWorkspace(
     }
   }
   if (existing === undefined) {
-    existing = await api.create<V1Deployment>(resource);
+    existing = await api.create<V1Deployment>(resource as V1Deployment);
   } else {
     // Kubernetes reads contain SDK model instances and unset optional fields.
     // Compare their JSON content without weakening the ownership or spec checks.
@@ -1825,6 +1829,11 @@ function sandboxDataMount(
   requirements: HarnessWorkloadRequirements,
 ) {
   const mount = options.kubernetes.sandboxDataMount;
+  if (mount === undefined) {
+    throw new OpenShellSandboxConfigurationFailure(
+      "OpenShell operator workspace mode requires a sandbox data mount.",
+    );
+  }
   validateSandboxDataMount(mount);
   const candidates = requirements.workspaceMounts.filter(
     (candidate) =>
@@ -1933,7 +1942,7 @@ function validatePolicySettings(options: OpenShellSandboxDriverOptions): void {
     });
   }
   const dataMount = options.kubernetes.sandboxDataMount;
-  const writable = dataMount.readOnly
+  const writable = dataMount?.readOnly
     ? (filesystem?.readWrite?.indexOf(dataMount.mountPath) ?? -1)
     : -1;
   if (writable !== -1) {
@@ -2292,11 +2301,115 @@ function sandboxSpec(
   };
 }
 
+/**
+ * Managed-mode Sandbox spec. The gateway owns the sandbox Pod's infrastructure: its
+ * default RuntimeClass, the sandbox ServiceAccount, user-namespace support, and the
+ * workspace volume backing /sandbox. OCC sends only the workload: image, command,
+ * environment, resources, containment policy, and providers. No driver-config mount
+ * may appear under /sandbox, or the gateway would drop its workspace persistence.
+ */
+function managedSandboxSpec(
+  options: OpenShellSandboxDriverOptions,
+  revision: Readonly<AgentRevision>,
+  requirements: HarnessWorkloadRequirements,
+  runtimeProvider?: string,
+  providerEnvironment: ReadonlySet<string> = new Set(),
+  workspaceNodeBinding?: WorkspaceNodeBinding,
+) {
+  const agentResources = configurationObject(
+    options.kubernetes.agentResources ?? {},
+    "OpenShell Agent resource configuration",
+  );
+  const driverConfig = {
+    containers: {
+      agent: {
+        resources: {
+          ...options.kubernetes.agentResources,
+          requests: {
+            ...configurationObject(
+              agentResources.requests ?? {},
+              "OpenShell Agent resource requests",
+            ),
+            "ephemeral-storage": "256Mi",
+          },
+          limits: {
+            ...configurationObject(agentResources.limits ?? {}, "OpenShell Agent resource limits"),
+            "ephemeral-storage": "1Gi",
+          },
+        },
+      },
+    },
+  };
+  return {
+    log_level: options.logLevel ?? "info",
+    environment: environment(requirements, providerEnvironment),
+    template: {
+      image: requirements.image,
+      labels: { ...requirements.labels },
+      driver_config: { fields: toProtobufStruct({ kubernetes: driverConfig }) },
+    },
+    policy: {
+      version: 1,
+      filesystem: managedFilesystemPolicy(options),
+      landlock: { compatibility: "hard_requirement" },
+      process: {
+        run_as_user: options.policy.process.runAsUser,
+        run_as_group: options.policy.process.runAsGroup,
+      },
+      network_policies: {
+        ...networkPolicies(options),
+        ...(runtimeProvider === undefined || workspaceNodeBinding === undefined
+          ? {}
+          : workspaceNodeNetworkPolicy(workspaceNodeBinding)),
+      },
+    },
+    providers: sandboxProviders(options, requirements, runtimeProvider),
+    command: sandboxCommand(
+      requirements.command,
+      [],
+      revision.harness.id === "openclaw",
+      requirements.loginMode,
+      requirements.workspaceSetup,
+    ),
+  };
+}
+
+/**
+ * Managed-mode filesystem policy: the gateway's workspace volume backs /sandbox, so
+ * the whole tree — including OCC's conventional runtime root beneath it — is writable
+ * workspace state rather than an OCC-approved mount.
+ */
+function managedFilesystemPolicy(options: OpenShellSandboxDriverOptions) {
+  const configured = options.policy.filesystem;
+  const readOnly = new Set(
+    (
+      configured?.readOnly ?? (configured === undefined ? OPENSHELL_DEFAULT_READ_ONLY_PATHS : [])
+    ).map((path) =>
+      validateFilesystemPolicyPath(path, "OpenShell configured read-only filesystem path"),
+    ),
+  );
+  const readWrite = new Set(
+    (
+      configured?.readWrite ?? (configured === undefined ? OPENSHELL_DEFAULT_READ_WRITE_PATHS : [])
+    ).map((path) =>
+      validateFilesystemPolicyPath(path, "OpenShell configured read-write filesystem path"),
+    ),
+  );
+  for (const writable of ["/sandbox", OPENSHELL_RUNTIME_ROOT, OPENSHELL_TEMPORARY]) {
+    readOnly.delete(writable);
+    readWrite.add(writable);
+  }
+  return {
+    include_workdir: configured?.includeWorkdir ?? true,
+    read_only: [...readOnly],
+    read_write: [...readWrite],
+  };
+}
+
 function validateOptions(options: OpenShellSandboxDriverOptions): void {
   configurationObject(options, "OpenShell configuration");
   configurationObject(options.gateway, "OpenShell gateway configuration");
   configurationObject(options.kubernetes, "OpenShell Kubernetes configuration");
-  configurationObject(options.kubernetes.serviceAccount, "OpenShell ServiceAccount configuration");
   configurationObject(options.policy, "OpenShell policy configuration");
   configurationObject(options.policy.process, "OpenShell process policy");
   if (
@@ -2400,14 +2513,39 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
   options.gateway.operatorWorkspaceResources?.forEach((resource, index) =>
     validateOperatorWorkspaceResource(resource, `gateway.operatorWorkspaceResources[${index}]`),
   );
-  nonempty(options.kubernetes.runtimeClassName, "OpenShell RuntimeClass name");
-  if (options.kubernetes.serviceAccount.mode !== "gatewayConfigured") {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell serviceAccount mode must be gatewayConfigured.",
-    );
+  if (options.gateway.workspaceMode === "managed") {
+    // The gateway owns the sandbox Pod's infrastructure in managed mode: its default
+    // RuntimeClass, the sandbox ServiceAccount, user-namespace support, and the
+    // workspace volume behind /sandbox. Accepting an OCC choice for any of them would
+    // misstate who owns the sandbox cluster.
+    for (const key of [
+      "runtimeClassName",
+      "serviceAccount",
+      "sandboxDataMount",
+      "userNamespaces",
+    ] as const) {
+      if (options.kubernetes[key] !== undefined) {
+        throw new OpenShellSandboxConfigurationFailure(
+          `OpenShell kubernetes option ${key} applies to operator workspace mode; in managed mode the gateway owns the sandbox Pod infrastructure.`,
+        );
+      }
+    }
+  } else {
+    nonempty(options.kubernetes.runtimeClassName, "OpenShell RuntimeClass name");
+    if (options.kubernetes.serviceAccount?.mode !== "gatewayConfigured") {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell serviceAccount mode must be gatewayConfigured.",
+      );
+    }
+    const mount = options.kubernetes.sandboxDataMount;
+    configurationObject(mount, "OpenShell sandbox data mount");
+    if (mount === undefined) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell operator workspace mode requires a sandbox data mount.",
+      );
+    }
+    validateSandboxDataMount(mount);
   }
-  configurationObject(options.kubernetes.sandboxDataMount, "OpenShell sandbox data mount");
-  validateSandboxDataMount(options.kubernetes.sandboxDataMount);
   if (
     options.policy.landlockCompatibility !== undefined &&
     options.policy.landlockCompatibility !== "hard_requirement"
@@ -2927,6 +3065,12 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   private readonly operatorOwnedKubernetesResources: boolean;
   private readonly openShellGit: OpenShellGitRuntime | undefined;
   readonly repositoryAccess?: NonNullable<SandboxDriver["repositoryAccess"]>;
+  /**
+   * Gateway-reported Harness readiness, exposed only in managed workspace mode. In
+   * operator mode Compute's provider Pod observation is the stronger readiness proof
+   * and this stays absent.
+   */
+  harnessReady?: (context: SandboxHarnessContext) => Promise<boolean>;
 
   static validateConfiguration(
     configuration: Readonly<OpenShellSandboxDriverOptions>,
@@ -2991,6 +3135,39 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     this.backend = selection.backend;
     this.operatorOwnedKubernetesResources = selection.operatorOwnedKubernetesResources === true;
+    if (options.gateway.workspaceMode === "managed") {
+      this.harnessReady = (context) => this.managedHarnessReady(context);
+    }
+  }
+
+  /**
+   * The gateway reports the Sandbox phase; READY plus the exact Codex service
+   * exposure is the managed-mode readiness proof, replacing Pod observation.
+   */
+  private async managedHarnessReady(context: SandboxHarnessContext): Promise<boolean> {
+    const sandbox = this.sandboxRef(context);
+    const client = this.gatewayClientForNamespace(sandbox.namespaceName);
+    const existing = await client.getSandbox(
+      { name: sandbox.resourceName, workspace: workspaceName(context.namespace) },
+      context.signal,
+    );
+    if (existing === undefined || !["SANDBOX_PHASE_READY", 2].includes(existing.phase ?? "")) {
+      return false;
+    }
+    if (context.revision.harness.id === "codex") {
+      const service = await client.getService(
+        workspaceName(context.namespace),
+        sandbox.resourceName,
+        "",
+        context.signal,
+      );
+      return (
+        service !== undefined &&
+        service.targetPort === harnessPort(context.requirements) &&
+        ["SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH", 2].includes(service.authorizationMode)
+      );
+    }
+    return true;
   }
 
   configureAgent(
@@ -3016,7 +3193,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       "OpenShell Agent configuration",
     );
     const defaults = optionalAgentConfiguration(agents.defaults, "OpenShell Agent defaults");
-    const workspace = this.options.kubernetes.sandboxDataMount.mountPath;
+    const configuredMount = this.options.kubernetes.sandboxDataMount?.mountPath;
+    const workspace: string =
+      configuredMount ?? (typeof defaults.workspace === "string" ? defaults.workspace : "/sandbox");
     // Both Harnesses and private initialization use this mount. The main entry wins over
     // defaults in OpenClaw and the Gateway, so pin both before admission freezes the config.
     const configured = {
@@ -3085,7 +3264,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     requireWorkspaceSetupConfiguration(
       configuration,
-      [this.options.kubernetes.sandboxDataMount.mountPath],
+      [this.options.kubernetes.sandboxDataMount?.mountPath ?? "/sandbox"],
       (setting, requirement) =>
         new ConfigurationHarnessError(configurationSettingMessage(setting, requirement)),
     );
@@ -3130,7 +3309,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       verifyActiveWorkspace(workspace, context.namespace);
       return;
     }
-    this.requireOperatorWorkspaceMode("ensure a Namespace");
     if (this.operatorOwnedKubernetesResources) {
       const api = kubernetes(context);
       const observed = await api.read({
@@ -3238,7 +3416,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
 
   async provisionHarness(context: SandboxHarnessContext): Promise<SandboxResourceRef> {
     assertNoRepositoryEnrollment(context, this.openShellGit);
-    this.requireOperatorWorkspaceMode("provision a Harness");
     if (!isDeepStrictEqual(context.requirements.proxyWiring?.plan, context.revision.egressPlan)) {
       throw new OpenShellSandboxConfigurationFailure(
         "Protected egress attachment must match the admitted revision.",
@@ -3278,6 +3455,18 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       throw new SandboxRevisionUnsupportedError(
         "SANDBOX_HARNESS_UNSUPPORTED",
         "OpenShell SandboxDriver supports only dedicated Codex or OpenClaw Harness revisions.",
+      );
+    }
+    if (
+      this.options.gateway.workspaceMode === "managed" &&
+      context.requirements.workspaceMounts.length > 0
+    ) {
+      // Workspace mounts are Compute-owned PVCs in OCC's cluster; a managed Sandbox
+      // runs in the gateway's cluster and cannot mount them. The gateway's workspace
+      // volume backs /sandbox instead.
+      throw new SandboxRevisionUnsupportedError(
+        "SANDBOX_HARNESS_UNSUPPORTED",
+        "OpenShell managed workspace mode does not support Harness workspace mounts; the gateway's workspace volume provides /sandbox.",
       );
     }
     if (
@@ -3392,49 +3581,66 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       ...selector,
       labels: context.requirements.labels,
       annotations,
-      spec: sandboxSpec(
-        this.options,
-        context.revision,
-        context.requirements,
-        runtimeProvider,
-        new Set([
-          WORKSPACE_NODE_SETUP_ENVIRONMENT,
-          WORKSPACE_NODE_CA_ENVIRONMENT,
-          managedGoogleCredentialEnvironment,
-          ...(!codex
-            ? Object.values(managedGoogleInstall.credentials).map((slot) => slot.delivery.env)
-            : []),
-          // Only the attached provider supplies its identity-bound credential alias.
-          // A static placeholder would survive withdrawal and shadow its absence.
-          ...(context.requirements.loginMode === "chatgptAuthTokens" ? ["CODEX_ACCESS_TOKEN"] : []),
-          ...Object.keys(runtimeCredentialMaterial.credentials),
-          ...(git ? ["GITHUB_TOKEN"] : []),
-        ]),
-        runtimeCredentialMaterial.binding,
-        egressPolicy,
-        plugin,
-      ),
+      spec:
+        this.options.gateway.workspaceMode === "managed"
+          ? managedSandboxSpec(
+              this.options,
+              context.revision,
+              context.requirements,
+              runtimeProvider,
+              new Set([
+                WORKSPACE_NODE_SETUP_ENVIRONMENT,
+                WORKSPACE_NODE_CA_ENVIRONMENT,
+                ...Object.keys(runtimeCredentialMaterial.credentials),
+              ]),
+              runtimeCredentialMaterial.binding,
+            )
+          : sandboxSpec(
+              this.options,
+              context.revision,
+              context.requirements,
+              runtimeProvider,
+              new Set([
+                WORKSPACE_NODE_SETUP_ENVIRONMENT,
+                WORKSPACE_NODE_CA_ENVIRONMENT,
+                managedGoogleCredentialEnvironment,
+                ...(!codex
+                  ? Object.values(managedGoogleInstall.credentials).map((slot) => slot.delivery.env)
+                  : []),
+                // Only the attached provider supplies its identity-bound credential alias.
+                // A static placeholder would survive withdrawal and shadow its absence.
+                ...(context.requirements.loginMode === "chatgptAuthTokens"
+                  ? ["CODEX_ACCESS_TOKEN"]
+                  : []),
+                ...Object.keys(runtimeCredentialMaterial.credentials),
+                ...(git ? ["GITHUB_TOKEN"] : []),
+              ]),
+              runtimeCredentialMaterial.binding,
+              egressPolicy,
+              plugin,
+            ),
       serviceExposures,
     };
-    if (git) {
-      create.spec.providers.push(git.provider);
+    if (git && this.options.gateway.workspaceMode === "operator") {
+      const operatorSpec = create.spec as ReturnType<typeof sandboxSpec>;
+      operatorSpec.providers.push(git.provider);
       Object.assign(
-        create.spec.environment,
+        operatorSpec.environment,
         Object.fromEntries(git.environment.map(({ name, value }) => [name, value])),
       );
       if (context.revision.egressPlan?.repositoryGit) {
-        const policy = asRecord(create.spec.policy.network_middlewares);
+        const policy = asRecord(operatorSpec.policy.network_middlewares);
         if (!isDeepStrictEqual(policy?.["oce-prepared-git"], git.middlewares["oce-prepared-git"])) {
           throw new OpenShellSandboxConfigurationFailure(
             "Git middleware differs from its protected admission.",
           );
         }
       } else {
-        Object.assign(create.spec.policy, { network_middlewares: git.middlewares });
+        Object.assign(operatorSpec.policy, { network_middlewares: git.middlewares });
       }
-      const readOnly = create.spec.policy.filesystem.read_only;
+      const readOnly = operatorSpec.policy.filesystem.read_only;
       readOnly.push(...git.readOnlyPaths.filter((path) => !readOnly.includes(path)));
-      create.spec.restart_policy = "SANDBOX_RESTART_POLICY_NEVER";
+      operatorSpec.restart_policy = "SANDBOX_RESTART_POLICY_NEVER";
       const continuity = this.gitContinuity(context);
       // Only the independent model attachment selected by this revision can survive Git expiry.
       const auth = context.revision.harnessAuth;
@@ -3556,7 +3762,11 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     // environment and policy. A replacement is created above without either plugin setting.
     let expectedSpec = create.spec;
     if (!plugin && managedCredentialBinding(context.revision.plugins?.plugins)) {
-      const previous = googleRequestPolicyFromSandbox(existing.spec?.policy);
+      // The managed spec has no network middlewares; only the operator spec carries
+      // Google workspace policies, so the reconciliation reads that shape.
+      const previous = googleRequestPolicyFromSandbox(
+        existing.spec?.policy as ReturnType<typeof sandboxSpec>['policy'],
+      );
       if (previous) {
         expectedSpec = {
           ...expectedSpec,
@@ -3569,7 +3779,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
             network_middlewares: previous.middlewares,
             network_policies: { ...expectedSpec.policy.network_policies, ...previous.networks },
           },
-        };
+        } as typeof expectedSpec;
       }
     }
     // Exact provider equality also verifies that a withdrawn provider is absent.
@@ -4025,7 +4235,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   async harnessEndpoint(context: SandboxHarnessContext): Promise<SandboxHarnessEndpoint> {
-    if (context.revision.harness.id !== "codex") {
+    if (context.revision.harness.mode !== "dedicated" || context.revision.harness.id !== "codex") {
       throw new SandboxRevisionUnsupportedError(
         "SANDBOX_HARNESS_UNSUPPORTED",
         "OpenShell exposes a provider-owned Harness endpoint only for dedicated Codex revisions.",
@@ -4035,7 +4245,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const caBundle = this.backend.client.publicRootCertificate();
     return Object.freeze({
       url: harnessWebSocketUrl(service.advertisedUrl),
-      workspaceRoot: this.options.kubernetes.sandboxDataMount.mountPath,
+      ...(this.options.kubernetes.sandboxDataMount === undefined
+        ? {}
+        : { workspaceRoot: this.options.kubernetes.sandboxDataMount.mountPath }),
       codexPermissionProfile: ":danger-full-access",
       ...(caBundle === undefined ? {} : { tls: Object.freeze({ caBundle }) }),
     });
@@ -4170,7 +4382,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     context: SandboxNamespaceContext & { readonly revision?: Readonly<AgentRevision> },
   ): Promise<void> {
     if (context.revision !== undefined) {
-      this.requireOperatorWorkspaceMode("clean up a revision");
       if (
         context.revision.namespaceId !== context.namespace.id ||
         context.revision.sandboxDriverId !== this.id
@@ -4608,7 +4819,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     context: SandboxLogContext,
     request: SandboxLogRequest,
   ): Promise<SandboxLogChunk> {
-    this.requireOperatorWorkspaceMode("read Sandbox logs");
     if (
       context.revision.namespaceId !== context.namespace.id ||
       context.revision.sandboxDriverId !== this.id

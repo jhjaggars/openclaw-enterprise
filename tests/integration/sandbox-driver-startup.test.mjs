@@ -318,6 +318,101 @@ function openShellDriver(gatewayClient, configuration) {
   );
 }
 
+function codexSandboxFixture(
+  driver,
+  {
+    runtimeManifest = JSON.stringify({ kind: "codex", selections: {} }),
+    codexConfig = "[features]\nplugins = false\n",
+    files,
+  } = {},
+) {
+  const context = namespaceContext();
+  const revision = {
+    id: "rev_00000000-0000-4000-8000-000000000003",
+    namespaceId: context.namespace.id,
+    agentId: "agt_00000000-0000-4000-8000-000000000003",
+    harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
+    sandboxDriverId: driver.id,
+  };
+  const nodeSetup = {
+    url: "wss://gateway.example.test/node",
+    bootstrapToken: "one-shot-node-setup",
+    expiresAtMs: Date.now() + 600_000,
+    tlsFingerprint: "sha256:test",
+  };
+  const setupCode = Buffer.from(JSON.stringify(nodeSetup)).toString("base64url");
+  const kubernetes = Object.create(KubernetesObjectApi.prototype);
+  kubernetes.read = async ({ metadata }) => ({
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: {
+      ...metadata,
+      labels: {
+        "openclaw.dev/namespace": context.namespace.id,
+        "openclaw.dev/agent": revision.agentId,
+      },
+    },
+    data: { setupCode: Buffer.from(setupCode).toString("base64") },
+  });
+  context.kubernetes = kubernetes;
+  const requirements = {
+    loginMode: "api_key",
+    image: "codex-runtime@sha256:synthetic",
+    command: harnessRuntimeCommand('console.error("codex runtime");'),
+    workspaceMounts: [
+      {
+        claimName: "harness-workspace-codex",
+        subPath: "workspace",
+        mountPath: "/home/node/workspace",
+        readOnly: false,
+      },
+      {
+        claimName: "harness-workspace-codex",
+        subPath: "workspace-node-codex",
+        mountPath: "/home/node/.openclaw-node",
+        readOnly: false,
+      },
+      {
+        claimName: "harness-workspace-codex",
+        subPath: "codex-sessions",
+        mountPath: "/home/node/.codex/sessions",
+        readOnly: false,
+      },
+    ],
+    credentialAttachments: [{ sourceId: "cs_test", ref: `oce-cs-${"b".repeat(24)}` }],
+    environment: [
+      { name: "HOME", value: "/home/node" },
+      { name: "CODEX_HOME", value: "/home/node/.codex" },
+      { name: "OPENCLAW_NODE_STATE_DIR", value: "/home/node/.openclaw-node" },
+      { name: "OPENCLAW_WORKSPACE_DIR", value: "/home/node/workspace" },
+      {
+        name: "OPENCLAW_NODE_CA_PEM",
+        value: "-----BEGIN CERTIFICATE-----\npublic-ca\n-----END CERTIFICATE-----\n",
+      },
+      { name: "APP_SERVER_PORT", value: "8080" },
+      { name: "APP_TOKEN_SHA", value: "a".repeat(64) },
+      {
+        name: "OPENCLAW_NODE_SETUP_CODE",
+        valueFrom: { secretKeyRef: { name: "workspace-node", key: "setupCode" } },
+      },
+    ],
+    files: files ?? [
+      {
+        name: "runtime.json",
+        content: runtimeManifest,
+        environmentVariable: "OPENCLAW_PLUGIN_RUNTIME_MANIFEST",
+      },
+      {
+        name: "config.toml",
+        content: codexConfig,
+        environmentVariable: "OPENCLAW_PLUGIN_CODEX_CONFIG_TOML",
+      },
+    ],
+    labels: { "openclaw.dev/revision": revision.id },
+  };
+  return { context, revision, requirements, runtimeManifest, codexConfig, nodeSetup };
+}
+
 /** A dedicated Codex revision on `driver`; `n` is the 12-digit tail of its ids. */
 function dedicatedRevision(driver, context, n) {
   return {
@@ -3816,6 +3911,11 @@ test("OpenShell managed mode reconciles its Workspace without touching Kubernete
   const events = [];
   const configuration = sandboxInstallation().drivers.sandbox.configuration;
   configuration.gateway.workspaceMode = "managed";
+  delete configuration.gateway.operatorNamespaceLabels;
+  delete configuration.gateway.networkPolicyResources;
+  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"]) {
+    delete configuration.kubernetes[key];
+  }
   const gatewayClient = workspaceGatewayClient([], events);
   const driver = openShellDriver(gatewayClient, configuration);
   const context = namespaceContext();
@@ -3879,6 +3979,176 @@ test("OpenShell gateway readiness checks once more at its deadline, not a poll i
   await assert.rejects(driver.ensureNamespace(context), /OpenShell gateway Pod is not ready\./);
   // A timer can wake a millisecond before Date.now() reaches the deadline, adding a check.
   assert.ok(podLists >= 2, "one check at the start and another at the deadline");
+  assert.deepEqual(gatewayClient.calls, []);
+});
+
+test("OpenShell managed mode rejects operator-only workspace options", async () => {
+  const gatewayClient = workspaceGatewayClient();
+  const base = () => {
+    const configuration = sandboxInstallation().drivers.sandbox.configuration;
+    configuration.gateway.workspaceMode = "managed";
+    delete configuration.gateway.operatorNamespaceLabels;
+    delete configuration.gateway.networkPolicyResources;
+    for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"]) {
+      delete configuration.kubernetes[key];
+    }
+    return configuration;
+  };
+  for (const [key, value] of [
+    ["operatorNamespaceLabels", { "openshell.ai/openclaw-workspace": "true" }],
+    ["readiness", { serviceName: "openshell-gateway", podSelector: { app: "openshell" } }],
+    [
+      "operatorWorkspaceResources",
+      [{ apiVersion: "v1", kind: "ServiceAccount", metadata: { name: "openshell-sandbox" } }],
+    ],
+    ["networkPolicyResources", [{ apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy" }]],
+    ["runtimeClassName", "openshell-sandbox"],
+    ["serviceAccount", { mode: "gatewayConfigured" }],
+    [
+      "sandboxDataMount",
+      { subPath: "workspace", mountPath: "/sandbox/enterprise", readOnly: false },
+    ],
+    ["userNamespaces", true],
+  ]) {
+    const configuration = base();
+    if (["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"].includes(key)) {
+      configuration.kubernetes[key] = value;
+    } else {
+      configuration.gateway[key] = value;
+    }
+    // Construction rejects the configuration; the Driver's startup validation
+    // flattens option-specific refusal text into its generic constraint error.
+    assert.throws(
+      () => openShellDriver(gatewayClient, configuration),
+      /Configuration validation failed|violates the Driver's constraints/,
+    );
+  }
+});
+
+test("OpenShell managed mode provisions a Sandbox without OCC-owned pod infrastructure", async () => {
+  const configuration = sandboxInstallation().drivers.sandbox.configuration;
+  configuration.gateway.workspaceMode = "managed";
+  delete configuration.gateway.operatorNamespaceLabels;
+  delete configuration.gateway.networkPolicyResources;
+  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"]) {
+    delete configuration.kubernetes[key];
+  }
+  const gatewayClient = workspaceGatewayClient();
+  const creates = [];
+  gatewayClient.createSandbox = async (request) => {
+    creates.push(structuredClone(request));
+    return {
+      name: request.name,
+      phase: "SANDBOX_PHASE_READY",
+      serviceUrls: { "": "https://sandbox-service.example.test:9443/" },
+    };
+  };
+  gatewayClient.getService = async () => ({
+    targetPort: 8080,
+    authorizationMode: "SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH",
+    url: "https://sandbox-service.example.test:9443/",
+  });
+  const driver = new OpenShellSandboxDriver(configuration, {
+    id: "openshell-sandbox",
+    implementation: "openshell",
+    backend: backendFor(gatewayClient),
+  });
+  const fixture = codexSandboxFixture(driver);
+  // Managed Sandboxes run in the gateway's cluster; Compute-owned workspace mounts
+  // cannot follow them, and the gateway's workspace volume backs /sandbox instead.
+  fixture.requirements.workspaceMounts = [];
+  const harnessContext = {
+    ...fixture.context,
+    revision: fixture.revision,
+    requirements: fixture.requirements,
+  };
+
+  const sandbox = await driver.provisionHarness(harnessContext);
+  assert.equal(creates.length, 1);
+  const spec = creates[0].spec;
+  // The gateway owns the RuntimeClass, ServiceAccount, and workspace volume; OCC
+  // sends only the workload and its containment policy.
+  assert.equal(spec.template.runtime_class_name, undefined);
+  assert.equal(spec.template.user_namespaces, undefined);
+  // The driver_config Struct wraps each value; unwrap it for the assertions.
+  const unwrap = (value) =>
+    Object.fromEntries(
+      Object.entries(value.fields ?? {}).map(([key, entry]) => [
+        key,
+        entry.structValue !== undefined
+          ? unwrap(entry.structValue)
+          : entry.listValue !== undefined
+            ? entry.listValue.values.map(unwrapValue)
+            : (unwrapValue(entry) ?? null),
+      ]),
+    );
+  const unwrapValue = (entry) => entry.stringValue ?? entry.numberValue ?? entry.boolValue ?? null;
+  const driverConfig = unwrap(spec.template.driver_config);
+  const kubernetes = driverConfig.kubernetes;
+  assert.equal(kubernetes.volumes, undefined);
+  assert.equal(kubernetes.containers.agent.volume_mounts, undefined);
+  assert.ok(kubernetes.containers.agent.resources.limits["ephemeral-storage"]);
+  // /sandbox is writable workspace state on the gateway's volume, not an OCC mount.
+  assert.ok(spec.policy.filesystem.read_write.includes("/sandbox"));
+  assert.ok(spec.policy.filesystem.read_write.includes("/sandbox/.openclaw-runtime"));
+  assert.equal(spec.environment.HOME, "/sandbox/.openclaw-runtime/home");
+  assert.equal(spec.environment.OPENCLAW_WORKSPACE_DIR, "/sandbox/enterprise");
+  // The Codex runtime provider and bearer-passthrough exposure are unchanged.
+  assert.ok(spec.providers.length > 0);
+  assert.deepEqual(creates[0].serviceExposures, [
+    { service: "", targetPort: 8080, authorizationMode: "bearer_passthrough" },
+  ]);
+  assert.deepEqual(sandbox, {
+    namespaceName: fixture.context.namespace.name,
+    agentId: fixture.revision.agentId,
+    revisionId: fixture.revision.id,
+    resourceName: sandbox.resourceName,
+  });
+
+  // Gateway-reported readiness: READY phase plus the exact Codex service exposure.
+  gatewayClient.getSandbox = async () => ({
+    name: sandbox.resourceName,
+    phase: "SANDBOX_PHASE_READY",
+  });
+  assert.equal(await driver.harnessReady(harnessContext), true);
+  gatewayClient.getSandbox = async () => ({
+    name: sandbox.resourceName,
+    phase: "SANDBOX_PHASE_PROVISIONING",
+  });
+  assert.equal(await driver.harnessReady(harnessContext), false);
+  gatewayClient.getSandbox = async () => ({
+    name: sandbox.resourceName,
+    phase: "SANDBOX_PHASE_READY",
+  });
+  gatewayClient.getService = async () => undefined;
+  assert.equal(await driver.harnessReady(harnessContext), false);
+});
+
+test("OpenShell managed mode refuses Harness workspace mounts", async () => {
+  const configuration = sandboxInstallation().drivers.sandbox.configuration;
+  configuration.gateway.workspaceMode = "managed";
+  delete configuration.gateway.operatorNamespaceLabels;
+  delete configuration.gateway.networkPolicyResources;
+  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"]) {
+    delete configuration.kubernetes[key];
+  }
+  const gatewayClient = workspaceGatewayClient();
+  const driver = new OpenShellSandboxDriver(configuration, {
+    id: "openshell-sandbox",
+    implementation: "openshell",
+    backend: backendFor(gatewayClient),
+  });
+  const fixture = codexSandboxFixture(driver);
+  // The fixture's default workspace mounts are Compute-owned PVCs; a managed
+  // Sandbox cannot mount them and must fail closed rather than drop them silently.
+  await assert.rejects(
+    driver.provisionHarness({
+      ...fixture.context,
+      revision: fixture.revision,
+      requirements: fixture.requirements,
+    }),
+    /managed workspace mode does not support Harness workspace mounts/,
+  );
   assert.deepEqual(gatewayClient.calls, []);
 });
 
@@ -5619,6 +5889,11 @@ test("OpenShell observes the Codex Harness through its exact bearer-passthrough 
   );
   const managedConfiguration = sandboxInstallation().drivers.sandbox.configuration;
   managedConfiguration.gateway.workspaceMode = "managed";
+  delete managedConfiguration.gateway.operatorNamespaceLabels;
+  delete managedConfiguration.gateway.networkPolicyResources;
+  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"]) {
+    delete managedConfiguration.kubernetes[key];
+  }
   const managed = openShellDriver(gatewayClient, managedConfiguration);
   await assert.rejects(
     managed.harnessStatus(statusContext),

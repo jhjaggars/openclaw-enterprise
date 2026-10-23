@@ -311,6 +311,12 @@ export interface SandboxDriver extends Driver {
   workspaceNodePeerLabels?(
     context: SandboxNamespaceContext & { readonly revision: Readonly<AgentRevision> },
   ): Promise<Readonly<Record<string, string>> | undefined>;
+  /**
+   * Confirms the provider-owned Harness for the exact revision is serving. When
+   * present, Compute uses this instead of observing provider Pods itself;
+   * implementations must fail closed (return false) until the Harness is ready.
+   */
+  harnessReady?(context: SandboxHarnessContext): Promise<boolean>;
   /** Required for revision stop, retirement, and Namespace cleanup, independent of Harness ownership. */
   cleanup(
     context: SandboxNamespaceContext & { readonly revision?: Readonly<AgentRevision> },

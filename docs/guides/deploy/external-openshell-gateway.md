@@ -50,3 +50,19 @@ The external gateway must reconcile Workspaces in the launcher's cluster:
 The credentialed OpenShell proofs in the
 [testing guide](../../testing/openshell.md) run against the profile's own
 gateway; run them on a profile without this selection.
+
+## Managed workspaces
+
+Select managed workspaces when the gateway should own the sandbox cluster
+entirely. In the Installation, set `drivers.sandbox.configuration.gateway.workspaceMode`
+to `managed` and omit the operator workspace options and the `kubernetes`
+Pod-infrastructure options; the gateway creates the namespace behind each
+Workspace (OpenShell 0.1.5 names them `openshell-{gateway_id}-{workspace}`),
+the sandbox ServiceAccount, and the workspace volume backing `/sandbox`, so OCC
+holds no kubeconfig for the sandbox cluster.
+
+OCC's gateway identity needs the gateway's admin role — workspace create and
+delete are admin-only RPCs. Harness readiness is the gateway-reported Sandbox
+phase plus the exact service exposure; Compute does not observe the remote
+Pods. Managed mode targets OpenShell 0.1.5 wire semantics, while operator mode
+remains fenced to v0.1.3-pre.2.
