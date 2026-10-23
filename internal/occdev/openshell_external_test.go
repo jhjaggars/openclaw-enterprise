@@ -194,9 +194,14 @@ func TestExternalOpenShellInstallationAuthenticatesWithOidc(t *testing.T) {
 	if !reflect.DeepEqual(callback[0].Spec.Egress[0].Ports, []map[string]any{{"protocol": "TCP", "port": 8443}}) {
 		t.Fatalf("unexpected callback egress ports: %#v", callback[0].Spec.Egress[0].Ports)
 	}
-	// The ClusterIP bridge is only for the owned in-cluster gateway.
-	if len(installation.Drivers.Compute.Configuration.Network.ProviderHarness) != 0 {
-		t.Fatalf("an external gateway must not configure the provider Harness bridge: %#v", installation.Drivers.Compute.Configuration.Network.ProviderHarness)
+	// An external gateway serves its Harness endpoints remotely: the provider
+	// route is the gateway's resolved exact address, not a local Pod peer.
+	if !reflect.DeepEqual(installation.Drivers.Compute.Configuration.Network.ProviderHarness, map[string]any{
+		"remote":  true,
+		"address": "203.0.113.10/32",
+		"port":    8443,
+	}) {
+		t.Fatalf("unexpected external provider Harness route: %#v", installation.Drivers.Compute.Configuration.Network.ProviderHarness)
 	}
 }
 

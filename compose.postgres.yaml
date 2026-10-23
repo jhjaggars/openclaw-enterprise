@@ -13,13 +13,16 @@ services:
       - occ_postgres_data:/var/lib/postgresql
       - ./migrations/init-local.sql:/docker-entrypoint-initdb.d/00-occ-roles.sql:ro,Z
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d openclaw_enterprise"]
       # pg_isready answers during the entrypoint's initdb phase, before the
-      # roles the migrate step needs exist; the start period covers first boot.
-      start_period: 10s
+      # roles the migrate step needs exist; check for the role itself.
+      test:
+        [
+          "CMD-SHELL",
+          'psql -U postgres -d openclaw_enterprise -tAc "SELECT 1 FROM pg_roles WHERE rolname=''occ_migrator''" | grep -q 1',
+        ]
       interval: 2s
       timeout: 3s
-      retries: 20
+      retries: 30
       # Failed probes during start_period do not count toward retries, so an init stalled
       # by slow disk IO is not declared unhealthy. The first passing probe still marks the
       # service healthy at once; start_interval (Docker's default is 5s) keeps `up --wait`

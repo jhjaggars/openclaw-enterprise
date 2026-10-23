@@ -443,8 +443,9 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 			gatewayNamespace = s.PlatformNamespace
 		}
 		// The ClusterIP bridge maps the owned k3d profile's *.openshell.localhost
-		// advertisements to the in-cluster gateway. An external gateway advertises its
-		// own real URLs, so ordinary Service or private routing applies instead.
+		// advertisements to the in-cluster gateway. An external gateway serves its
+		// advertised Harness endpoints from its own cluster, so the provider route is
+		// the gateway's resolved exact address and Compute admits only it.
 		if s.openShellExternal == nil {
 			compute["network"].(map[string]any)["providerHarness"] = map[string]any{
 				"namespace": gatewayNamespace,
@@ -454,6 +455,12 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 				},
 				"address": openShellGatewayAddress,
 				"port":    8080,
+			}
+		} else {
+			compute["network"].(map[string]any)["providerHarness"] = map[string]any{
+				"remote":  true,
+				"address": s.openShellExternal.addresses[0],
+				"port":    s.openShellExternal.port,
 			}
 		}
 		var workspaceResources []any
@@ -595,6 +602,7 @@ func openShellInstallationConfiguration(s *developmentState, workspaceResources 
 	gatewayLabels := map[string]string{
 		"app.kubernetes.io/name":     "openshell",
 		"app.kubernetes.io/instance": openShellGatewayService,
+	}
 	return map[string]any{
 		"id": openShellSandboxID,
 		"configuration": map[string]any{
