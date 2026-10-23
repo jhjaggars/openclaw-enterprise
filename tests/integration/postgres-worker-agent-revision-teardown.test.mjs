@@ -275,6 +275,7 @@ test(
       revision: { repositoryCredentials: repository.snapshot },
     });
     let iamUnavailable = false;
+    let activations = 0;
     const events = [];
     // Preparation passes its own authority check; IAM then fails the one made again just
     // before the pointer commit.
@@ -283,6 +284,7 @@ test(
         ...fixture.compute,
         activationOrder: "beforeCommit",
         async activateRevision() {
+          activations += 1;
           iamUnavailable = true;
         },
       },
@@ -293,6 +295,7 @@ test(
     );
     await fixture.work(candidate, "failed_permanent");
     await fixture.stop();
+    assert.equal(activations, 1, "only the check after activation met the outage");
     // The retry says why the check failed (finding 2272).
     const ended = (await completedPasses(events, candidate, "retry")).at(-1);
     assert.equal(ended.code, "DEPENDENCY_UNAVAILABLE");
