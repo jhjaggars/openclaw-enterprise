@@ -3921,19 +3921,26 @@ test("OpenShell managed mode reconciles its Workspace without touching Kubernete
   const context = namespaceContext();
   context.kubernetes = kubernetesObjectClient(events);
 
+  // Managed mode derives a collision-free Workspace key from the Namespace ID;
+  // the gateway reserves names like "default" for its own built-ins.
+
   // Managed mode creates the Workspace over RPC only: the gateway owns the namespace
   // behind it, so no Kubernetes mutation may occur on the OCC side.
+  // Managed mode derives a collision-free Workspace key from the Namespace ID;
+  // the gateway reserves names like "default" for its own built-ins.
+  const { createHash: managedNameHash } = await import("node:crypto");
+  const derived = `oce-ws-${managedNameHash("sha256").update(context.namespace.id).digest("hex").slice(0, 12)}`;
   await driver.ensureNamespace(context);
   await driver.ensureNamespace(context);
   assert.deepEqual(events, [
     ["gateway", "health"],
-    ["gateway", "getWorkspace", context.namespace.name],
-    ["gateway", "createWorkspace", context.namespace.name],
+    ["gateway", "getWorkspace", derived],
+    ["gateway", "createWorkspace", derived],
     ["gateway", "health"],
-    ["gateway", "getWorkspace", context.namespace.name],
+    ["gateway", "getWorkspace", derived],
   ]);
-  assert.deepEqual(gatewayClient.workspaces.get(context.namespace.name), {
-    name: context.namespace.name,
+  assert.deepEqual(gatewayClient.workspaces.get(derived), {
+    name: derived,
     labels: {
       "app.kubernetes.io/managed-by": "openclaw-enterprise",
       "openclaw.dev/namespace-id": context.namespace.id,
@@ -3946,10 +3953,10 @@ test("OpenShell managed mode reconciles its Workspace without touching Kubernete
   events.length = 0;
   await driver.cleanup(context);
   assert.deepEqual(events, [
-    ["gateway", "getWorkspace", context.namespace.name],
-    ["gateway", "deleteWorkspace", context.namespace.name],
+    ["gateway", "getWorkspace", derived],
+    ["gateway", "deleteWorkspace", derived],
   ]);
-  assert.equal(gatewayClient.workspaces.has(context.namespace.name), false);
+  assert.equal(gatewayClient.workspaces.has(derived), false);
 });
 
 test("OpenShell gateway readiness checks once more at its deadline, not a poll interval later", async () => {

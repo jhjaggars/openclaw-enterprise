@@ -1050,6 +1050,18 @@ function workspaceName(namespace: Readonly<Namespace>): string {
   return openShellWorkspaceName(namespace);
 }
 
+/**
+ * Managed-mode Workspace name. The gateway owns the namespace behind the
+ * Workspace, so the name only needs to be deterministic per OCC Namespace and
+ * collision-free with names the gateway reserves for itself ("default" and
+ * other built-ins). A hash of the Namespace ID gives both; the OCC-facing
+ * name never reaches the gateway as a Workspace key in managed mode.
+ */
+function managedWorkspaceName(namespace: Readonly<Namespace>): string {
+  const id = nonempty(namespace.id, "OCC Namespace ID");
+  return `oce-ws-${sha256Hex(id, 12)}`;
+}
+
 function workspaceLabels(namespace: Readonly<Namespace>): Readonly<Record<string, string>> {
   return Object.freeze({
     [OPENSHELL_MANAGED_BY_LABEL]: OPENSHELL_MANAGED_BY,
@@ -1060,8 +1072,8 @@ function workspaceLabels(namespace: Readonly<Namespace>): Readonly<Record<string
 function verifyWorkspaceOwnership(
   workspace: OpenShellWorkspaceResponse,
   namespace: Readonly<Namespace>,
+  expectedName: string,
 ): void {
-  const expectedName = workspaceName(namespace);
   const expectedLabels = workspaceLabels(namespace);
   if (
     workspace.name !== expectedName ||
@@ -1076,8 +1088,9 @@ function verifyWorkspaceOwnership(
 function verifyActiveWorkspace(
   workspace: OpenShellWorkspaceResponse,
   namespace: Readonly<Namespace>,
+  expectedName: string,
 ): void {
-  verifyWorkspaceOwnership(workspace, namespace);
+  verifyWorkspaceOwnership(workspace, namespace, expectedName);
   if (workspace.phase !== "WORKSPACE_PHASE_ACTIVE" && workspace.phase !== 1) {
     throw new OpenShellSandboxConfigurationFailure(
       `OpenShell Workspace ${workspace.name} is not active.`,
@@ -3118,7 +3131,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const sandbox = this.sandboxRef(context);
     const client = this.gatewayClientForNamespace(sandbox.namespaceName);
     const existing = await client.getSandbox(
-      { name: sandbox.resourceName, workspace: workspaceName(context.namespace) },
+      { name: sandbox.resourceName, workspace: this.workspaceName(context.namespace) },
       context.signal,
     );
     if (existing === undefined || !["SANDBOX_PHASE_READY", 2].includes(existing.phase ?? "")) {
@@ -3126,7 +3139,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     if (context.revision.harness.id === "codex") {
       const service = await client.getService(
-        workspaceName(context.namespace),
+        this.workspaceName(context.namespace),
         sandbox.resourceName,
         "",
         context.signal,
@@ -3255,7 +3268,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       // owns the namespace behind it, so OCC performs no Kubernetes mutation here.
       const client = this.gatewayClientForNamespace(namespace);
       await client.health(context.signal);
-      const name = workspaceName(context.namespace);
+      const name = this.workspaceName(context.namespace);
       let workspace = await client.getWorkspace(name, context.signal);
       if (workspace === undefined) {
         try {
@@ -3276,7 +3289,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
           }
         }
       }
-      verifyActiveWorkspace(workspace, context.namespace);
+      verifyActiveWorkspace(workspace, context.namespace, this.workspaceName(context.namespace));
       return;
     }
     if (this.operatorOwnedKubernetesResources) {
@@ -3360,7 +3373,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     // owns the namespace behind it, so OCC performs no Kubernetes mutation here.
     const client = this.gatewayClientForNamespace(namespace);
     await client.health(context.signal);
-    const name = workspaceName(context.namespace);
+    const name = this.workspaceName(context.namespace);
     let workspace = await client.getWorkspace(name, context.signal);
     if (workspace === undefined) {
       try {
@@ -3381,7 +3394,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         }
       }
     }
-    verifyActiveWorkspace(workspace, context.namespace);
+    verifyActiveWorkspace(workspace, context.namespace, this.workspaceName(context.namespace));
   }
 
   async provisionHarness(context: SandboxHarnessContext): Promise<SandboxResourceRef> {
@@ -3457,7 +3470,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const sandbox = this.sandboxRef(context);
     const codex = context.revision.harness.id === "codex";
     const client = this.gatewayClientForNamespace(sandbox.namespaceName);
-    const workspace = workspaceName(context.namespace);
+    const workspace = this.workspaceName(context.namespace);
     const plugin = openShellPluginPolicy(
       context.revision,
       context.requirements,
@@ -4312,7 +4325,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const sandbox = this.sandboxRef(context);
     const client = this.gatewayClientForNamespace(sandbox.namespaceName);
     const service = await client.getService(
-      workspaceName(context.namespace),
+      this.workspaceName(context.namespace),
       sandbox.resourceName,
       "",
       context.signal,
@@ -4360,6 +4373,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         );
       }
       const sandbox = this.sandboxRef({ namespace: context.namespace, revision: context.revision });
+      const client = this.gatewayClientForNamespace(sandbox.namespaceName);
+      const workspace = this.workspaceName(context.namespace);
       if (
         context.revision.harness.mode === "dedicated" &&
         context.revision.harness.id === "openclaw"
@@ -4367,8 +4382,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         // Creation can reach Kubernetes without returning a receipt or creating a Sandbox.
         await cleanupNativeWorkspace({ ...context, revision: context.revision }, sandbox);
       }
-      const client = this.gatewayClientForNamespace(sandbox.namespaceName);
-      const workspace = workspaceName(context.namespace);
       const selector = { name: sandbox.resourceName, workspace };
       // A stop, retire or delete records the Sandbox removed only once OpenShell confirms it.
       // GetSandbox and DeleteSandbox answer NOT_FOUND alike for a Sandbox that is gone and for
@@ -4438,11 +4451,14 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     const namespace = namespaceName(context.namespace);
     const client = this.gatewayClientForNamespace(namespace);
-    const workspace = await client.getWorkspace(workspaceName(context.namespace), context.signal);
+    const workspace = await client.getWorkspace(
+      this.workspaceName(context.namespace),
+      context.signal,
+    );
     if (workspace !== undefined) {
       // A prior delete can have reached TERMINATING before its response was lost.
       // Ownership remains the cleanup boundary, and DeleteWorkspace is idempotent.
-      verifyWorkspaceOwnership(workspace, context.namespace);
+      verifyWorkspaceOwnership(workspace, context.namespace, this.workspaceName(context.namespace));
       const providers = await client.listProviders(workspace.name, context.signal);
       for (const provider of providers) {
         if (
@@ -4802,7 +4818,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     try {
       response = await reader.getSandboxLogs(
         {
-          workspace: workspaceName(context.namespace),
+          workspace: this.workspaceName(context.namespace),
           sandbox: sandbox.resourceName,
           lines: request.lines,
           ...(request.sinceTime === undefined ? {} : { sinceTime: request.sinceTime }),
@@ -5058,6 +5074,14 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     context: Pick<SandboxHarnessContext, "namespace" | "revision">,
   ): SandboxResourceRef {
     return this.sandboxRef(context);
+  }
+
+  /** The Workspace key on the gateway: operator mode reuses the OCC name (the
+   * shared Kubernetes namespace), managed mode derives a collision-free key. */
+  private workspaceName(namespace: Readonly<Namespace>): string {
+    return this.options.gateway.workspaceMode === "managed"
+      ? managedWorkspaceName(namespace)
+      : workspaceName(namespace);
   }
 
   private sandboxRef(
