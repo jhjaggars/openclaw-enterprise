@@ -13,6 +13,7 @@ import type {
   CredentialSourceStatus,
   CredentialSourceType,
   CredentialSourceToken,
+  Namespace,
 } from "@openclaw-enterprise/contracts";
 import {
   configurationSettingMessage,
@@ -42,6 +43,7 @@ import { normalizeOpenAiBaseUrl, openAiBaseUrlSpellingMessage } from "../openai-
 
 import {
   openShellProviderName,
+  openShellWorkspaceKey,
   openShellWorkspaceName,
   type OpenShellGateway,
   type OpenShellGatewayPlacement,
@@ -72,6 +74,19 @@ export interface OpenShellCredentialGatewayOptions {
    * Without it the catalog omits `bearer-token`.
    */
   readonly toolBinaries?: readonly string[];
+  /**
+   * How the gateway organizes Workspaces. Managed mode derives the Workspace
+   * key from the OCC Namespace ID; operator mode reuses the OCC Namespace
+   * name (the shared Kubernetes namespace). Must match the Sandbox Driver's
+   * gateway.workspaceMode so both derive the same Workspace for a Namespace.
+   */
+  readonly workspaceMode?: "managed" | "operator";
+  /**
+   * The inference endpoint the OpenAI credential may authenticate to. Defaults
+   * to api.openai.com; a private model gateway replaces both the provider
+   * profile's endpoint binding and the endpoint the credential check admits.
+   */
+  readonly modelEndpoint?: { readonly host: string; readonly port: number };
 }
 
 export interface OpenShellCredentialGatewaySelection {
@@ -977,9 +992,22 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
       ...(options.toolBinaries === undefined
         ? {}
         : { toolBinaries: Object.freeze([...options.toolBinaries]) }),
+      ...(options.workspaceMode === undefined ? {} : { workspaceMode: options.workspaceMode }),
+      ...(options.modelEndpoint === undefined
+        ? {}
+        : {
+            modelEndpoint: Object.freeze({
+              host: options.modelEndpoint.host,
+              port: options.modelEndpoint.port,
+            }),
+          }),
     });
     this.backend = selection.backend;
     this.refresh = selection.backend.drivers.credential_refresh !== undefined;
+  }
+
+  private workspaceName(namespace: Readonly<Namespace>): string {
+    return openShellWorkspaceKey(namespace, this.options.workspaceMode ?? "operator");
   }
 
   async listSourceTypes(
@@ -1017,7 +1045,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
       }
       throw error;
     }
-    const workspace = openShellWorkspaceName(context.namespace);
+    const workspace = this.workspaceName(context.namespace);
     const client = this.client(context);
     const credentials = providerCredentials(type, input);
     const name = openShellProviderName(context.source.id);
@@ -1083,7 +1111,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
         "A refresh-type source has no static value; reconfigure its refresh material instead.",
       );
     }
-    const workspace = openShellWorkspaceName(context.namespace);
+    const workspace = this.workspaceName(context.namespace);
     const client = this.client(context);
     const name = openShellProviderName(context.source.id);
     const existing = await client.getProvider(workspace, name, context.signal);
@@ -1124,7 +1152,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
     // Only the operator channel can export credentials. OpenShell may refresh to
     // satisfy its lifetime guarantee; the Driver never receives refresh material here.
     const token = await this.credentialClient(context).getProviderCredential(
-      openShellWorkspaceName(context.namespace),
+      this.workspaceName(context.namespace),
       provider.name,
       CODEX_ACCESS_TOKEN_ENV,
       context.signal,
@@ -1139,7 +1167,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
   async sourceStatus(context: CredentialSourceContext): Promise<CredentialSourceStatus> {
     knownSourceType(context.source.type);
     const provider = await this.client(context).getProvider(
-      openShellWorkspaceName(context.namespace),
+      this.workspaceName(context.namespace),
       openShellProviderName(context.source.id),
       context.signal,
     );
@@ -1157,7 +1185,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
 
   async removeSource(context: CredentialSourceContext): Promise<void> {
     knownSourceType(context.source.type);
-    const workspace = openShellWorkspaceName(context.namespace);
+    const workspace = this.workspaceName(context.namespace);
     const name = openShellProviderName(context.source.id);
     const client = this.client(context);
     const existing = await client.getProvider(workspace, name, context.signal);
@@ -1179,7 +1207,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
   async attachForRevision(
     context: CredentialRevisionContext,
   ): Promise<readonly CredentialSourceAttachment[]> {
-    const workspace = openShellWorkspaceName(context.namespace);
+    const workspace = this.workspaceName(context.namespace);
     const client = this.client(context);
     const binding = managedCredentialBinding(context.revision.plugins?.plugins);
     const selected = context.sources.find(({ id }) => id === binding?.sourceId);
@@ -1284,7 +1312,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
         "OpenShell attachment status requires the provisioned Sandbox.",
       );
     }
-    const workspace = openShellWorkspaceName(context.namespace);
+    const workspace = this.workspaceName(context.namespace);
     const client = this.client(context);
     const statuses: CredentialAttachmentStatus[] = [];
     for (const source of context.sources) {
@@ -1319,7 +1347,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
    * identity's role is restored.
    */
   async withdraw(context: CredentialWithdrawalContext): Promise<CredentialAttachmentStatus> {
-    const workspace = openShellWorkspaceName(context.namespace);
+    const workspace = this.workspaceName(context.namespace);
     const client = this.client(context);
     const provider = openShellProviderName(context.sourceId);
     const sandbox = context.sandbox.resourceName;
@@ -1397,7 +1425,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
       throw new ScopeViolationError("The Codex OAuth source is not owned by this gateway.");
     }
     const provider = await this.client(context).getProvider(
-      openShellWorkspaceName(context.namespace),
+      this.workspaceName(context.namespace),
       openShellProviderName(context.source.id),
       context.signal,
     );
@@ -1434,7 +1462,19 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
     gateway: OpenShellGatewayPlacement | undefined,
     signal: AbortSignal,
   ): Promise<void> {
-    const base = type.profile(sourceId, config, this.options, gateway);
+    const profileBase = type.profile(sourceId, config, this.options, gateway);
+    const endpoint = this.options.modelEndpoint;
+    const base =
+      endpoint === undefined
+        ? profileBase
+        : {
+            ...profileBase,
+            endpoints: profileBase.endpoints.map((entry) =>
+              entry.host === "api.openai.com" && entry.port === 443
+                ? { ...entry, host: endpoint.host, port: endpoint.port }
+                : entry,
+            ),
+          };
     const digest = sha256Hex(JSON.stringify(base));
     const profile: OpenShellProviderProfile = {
       ...base,

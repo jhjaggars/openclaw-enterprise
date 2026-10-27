@@ -221,6 +221,33 @@ export function openShellWorkspaceName(namespace: Readonly<Namespace>): string {
   return name;
 }
 
+/**
+ * Managed-mode Workspace name. The gateway owns the namespace behind the
+ * Workspace, so the name only needs to be deterministic per OCC Namespace and
+ * collision-free with names the gateway reserves for itself ("default" and
+ * other built-ins). A hash of the Namespace ID gives both; the OCC-facing
+ * name never reaches the gateway as a Workspace key in managed mode.
+ */
+export function managedOpenShellWorkspaceName(namespace: Readonly<Namespace>): string {
+  const id = isNonEmptyString(namespace.id) ? namespace.id : "";
+  if (id === "") {
+    throw new OpenShellBackendConfigurationFailure(
+      "OpenShell managed-mode Workspace names require the OCC Namespace ID.",
+    );
+  }
+  return `oce-ws-${sha256Hex(id, 12)}`;
+}
+
+/** The Workspace key both OpenShell Drivers derive for one OCC Namespace. */
+export function openShellWorkspaceKey(
+  namespace: Readonly<Namespace>,
+  mode: "managed" | "operator",
+): string {
+  return mode === "managed"
+    ? managedOpenShellWorkspaceName(namespace)
+    : openShellWorkspaceName(namespace);
+}
+
 /** One OpenShell provider per OCC credential source, named without exposing the source ID. */
 export function openShellProviderName(sourceId: string): string {
   return `oce-cs-${sha256Hex(sourceId, 24)}`;

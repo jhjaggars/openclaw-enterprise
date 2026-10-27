@@ -471,7 +471,17 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 		config["drivers"].(map[string]any)["credential_gateway"] = map[string]any{
 			"id": openShellCredentialGatewayID,
 			// Native OpenClaw uses Node; retain both architecture-specific Codex allowances.
-			"configuration": map[string]any{"binaries": append(openShellCodexBinaries(), "/usr/local/bin/node")},
+			"configuration": map[string]any{
+				"binaries": append(openShellCodexBinaries(), "/usr/local/bin/node"),
+				// Must match the Sandbox Driver's gateway.workspaceMode so both
+				// OpenShell Drivers derive the same Workspace per Namespace.
+				"workspaceMode": func() string {
+					if s.openShellExternal != nil && s.openShellExternal.managed {
+						return "managed"
+					}
+					return "operator"
+				}(),
+			},
 		}
 		if s.ProtectedEgress {
 			if s.egressKeyID == "" {

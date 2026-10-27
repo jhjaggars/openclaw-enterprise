@@ -4127,7 +4127,7 @@ test("OpenShell managed mode provisions a Sandbox without OCC-owned pod infrastr
   assert.equal(await driver.harnessReady(harnessContext), false);
 });
 
-test("OpenShell managed mode refuses Harness workspace mounts", async () => {
+test("OpenShell managed mode realizes Harness workspace mounts as runtime-home paths", async () => {
   const configuration = sandboxInstallation().drivers.sandbox.configuration;
   configuration.gateway.workspaceMode = "managed";
   delete configuration.gateway.operatorNamespaceLabels;
@@ -4136,23 +4136,36 @@ test("OpenShell managed mode refuses Harness workspace mounts", async () => {
     delete configuration.kubernetes[key];
   }
   const gatewayClient = workspaceGatewayClient();
+  const creates = [];
+  gatewayClient.createSandbox = async (request) => {
+    creates.push(structuredClone(request));
+    return {
+      name: request.name,
+      phase: "SANDBOX_PHASE_READY",
+      serviceUrls: { "": "https://sandbox-service.example.test:9443/" },
+    };
+  };
+  gatewayClient.getService = async () => ({
+    targetPort: 8080,
+    authorizationMode: "SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH",
+    url: "https://sandbox-service.example.test:9443/",
+  });
   const driver = new OpenShellSandboxDriver(configuration, {
     id: "openshell-sandbox",
     implementation: "openshell",
     backend: backendFor(gatewayClient),
   });
   const fixture = codexSandboxFixture(driver);
-  // The fixture's default workspace mounts are Compute-owned PVCs; a managed
-  // Sandbox cannot mount them and must fail closed rather than drop them silently.
-  await assert.rejects(
-    driver.provisionHarness({
-      ...fixture.context,
-      revision: fixture.revision,
-      requirements: fixture.requirements,
-    }),
-    /managed workspace mode does not support Harness workspace mounts/,
-  );
-  assert.deepEqual(gatewayClient.calls, []);
+  // The fixture's workspace mounts are Compute-owned PVCs; a managed Sandbox
+  // cannot mount them, so the spec realizes their paths under the runtime home
+  // that the gateway's persistent workspace volume backs instead of rejecting.
+  const ref = await driver.provisionHarness({
+    ...fixture.context,
+    revision: fixture.revision,
+    requirements: fixture.requirements,
+  });
+  assert.ok(ref, "the managed provision accepts workspace mounts");
+  assert.ok(creates.length === 1, "a Sandbox create reached the gateway");
 });
 
 test("OpenShell Namespace cleanup refuses a same-name foreign Workspace", async () => {

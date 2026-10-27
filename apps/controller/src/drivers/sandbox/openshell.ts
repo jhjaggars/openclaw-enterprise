@@ -96,6 +96,7 @@ import type {
 import {
   isOpenShellProviderName,
   openShellProviderName,
+  openShellWorkspaceKey,
   openShellWorkspaceName,
   type OpenShellGateway,
 } from "../../backends/openshell.ts";
@@ -1048,18 +1049,6 @@ function namespaceName(namespace: Readonly<Namespace>): string {
 
 function workspaceName(namespace: Readonly<Namespace>): string {
   return openShellWorkspaceName(namespace);
-}
-
-/**
- * Managed-mode Workspace name. The gateway owns the namespace behind the
- * Workspace, so the name only needs to be deterministic per OCC Namespace and
- * collision-free with names the gateway reserves for itself ("default" and
- * other built-ins). A hash of the Namespace ID gives both; the OCC-facing
- * name never reaches the gateway as a Workspace key in managed mode.
- */
-function managedWorkspaceName(namespace: Readonly<Namespace>): string {
-  const id = nonempty(namespace.id, "OCC Namespace ID");
-  return `oce-ws-${sha256Hex(id, 12)}`;
 }
 
 function workspaceLabels(namespace: Readonly<Namespace>): Readonly<Record<string, string>> {
@@ -3440,18 +3429,10 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         "OpenShell SandboxDriver supports only dedicated Codex or OpenClaw Harness revisions.",
       );
     }
-    if (
-      this.options.gateway.workspaceMode === "managed" &&
-      context.requirements.workspaceMounts.length > 0
-    ) {
-      // Workspace mounts are Compute-owned PVCs in OCC's cluster; a managed Sandbox
-      // runs in the gateway's cluster and cannot mount them. The gateway's workspace
-      // volume backs /sandbox instead.
-      throw new SandboxRevisionUnsupportedError(
-        "SANDBOX_HARNESS_UNSUPPORTED",
-        "OpenShell managed workspace mode does not support Harness workspace mounts; the gateway's workspace volume provides /sandbox.",
-      );
-    }
+    // In managed mode, Harness workspace mounts do not become volume mounts: the
+    // revision's workspace paths are relocated under the runtime home, which the
+    // gateway's persistent workspace volume backs. The mount metadata is accepted
+    // and realized as that layout rather than rejected.
     if (
       context.revision.sandboxDriverId !== undefined &&
       context.revision.sandboxDriverId !== this.id
@@ -5079,9 +5060,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   /** The Workspace key on the gateway: operator mode reuses the OCC name (the
    * shared Kubernetes namespace), managed mode derives a collision-free key. */
   private workspaceName(namespace: Readonly<Namespace>): string {
-    return this.options.gateway.workspaceMode === "managed"
-      ? managedWorkspaceName(namespace)
-      : workspaceName(namespace);
+    return openShellWorkspaceKey(namespace, this.options.gateway.workspaceMode);
   }
 
   private sandboxRef(
