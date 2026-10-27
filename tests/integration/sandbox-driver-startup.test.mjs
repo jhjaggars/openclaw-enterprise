@@ -3996,7 +3996,12 @@ test("OpenShell managed mode rejects operator-only workspace options", async () 
     configuration.gateway.workspaceMode = "managed";
     delete configuration.gateway.operatorNamespaceLabels;
     delete configuration.gateway.networkPolicyResources;
-    for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount", "userNamespaces"]) {
+    for (const key of [
+      "runtimeClassName",
+      "serviceAccount",
+      "sandboxDataMount",
+      "userNamespaces",
+    ]) {
       delete configuration.kubernetes[key];
     }
     return configuration;

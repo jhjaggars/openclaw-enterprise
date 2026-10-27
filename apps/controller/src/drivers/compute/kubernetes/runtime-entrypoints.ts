@@ -451,7 +451,25 @@ function writeCodexConfigToml(runtime) {
   }
   const target = safeRuntimePath(process.env.CODEX_HOME, "config.toml");
   pluginMkdirSync(pluginDirname(target), { recursive: true });
-  pluginWriteFileSync(target, runtime.codexConfigurationToml, { mode: 0o600 });
+  // A custom model endpoint configured for the harness reaches Codex the same
+  // way the runtime projects it for its own Codex spawns: as a provider entry.
+  // A dedicated provider (rather than the built-in openai base URL override)
+  // also selects the plain HTTP transport — the built-in provider always
+  // prefers WebSocket, which a relay-fronted endpoint may not serve — and the
+  // credential still flows from CODEX_HOME auth.json through the boundary.
+  var customBaseUrl = process.env.OPENAI_BASE_URL;
+  var content = runtime.codexConfigurationToml;
+  if (typeof customBaseUrl === "string" && customBaseUrl.length > 0) {
+    content = content
+      + "[model_providers.openclaw_model]\n"
+      + "name = \"openclaw model endpoint\"\n"
+      + "base_url = " + JSON.stringify(customBaseUrl) + "\n"
+      + "wire_api = \"responses\"\n"
+      + "supports_websockets = false\n"
+      + "\n"
+      + "model_provider = \"openclaw_model\"\n";
+  }
+  pluginWriteFileSync(target, content, { mode: 0o600 });
 }
 
 function pluginRuntimeReady() {
@@ -3963,6 +3981,9 @@ if (login.status !== 0 || login.error) {
       ? "AUTHENTICATION_FAILED" : "LOGIN_FAILED",
   );
 } else {
+// The model credential stays the supervisor's resolve reference; the probe's
+// custom provider forwards it and the network boundary substitutes the value.
+const modelCredentialReference = process.env.OPENAI_API_KEY;
 delete process.env.CODEX_ACCESS_TOKEN;
 delete process.env.OPENAI_API_KEY;
 delete process.env.OCE_CODEX_CHATGPT_ACCOUNT;
@@ -4060,6 +4081,20 @@ ${disableUnboundedConnectionRetries ? '      "--disable", "unbounded_connection_
       "--skip-git-repo-check", "--json", "--sandbox", "read-only", "--cd", directory,
       "--model", selectedModel.slice(selectedModel.indexOf("/") + 1),
       "-c", "cli_auth_credentials_store=file",
+      // A custom model endpoint selects a dedicated provider so Codex uses the
+      // plain HTTP transport (the built-in openai provider always prefers
+      // WebSocket, which a relay-fronted endpoint may not serve) and reads its
+      // credential from the environment the supervisor provisioned.
+      ...(typeof process.env.OPENAI_BASE_URL === "string" && process.env.OPENAI_BASE_URL.length > 0
+        ? [
+            "-c", "model_providers.openclaw_model.name=\"openclaw model endpoint\"",
+            "-c", "model_providers.openclaw_model.base_url=" + JSON.stringify(process.env.OPENAI_BASE_URL),
+            "-c", "model_providers.openclaw_model.wire_api=\"responses\"",
+            "-c", "model_providers.openclaw_model.supports_websockets=false",
+            "-c", "model_providers.openclaw_model.env_key=\"OPENAI_API_KEY\"",
+            "-c", "model_provider=\"openclaw_model\"",
+          ]
+        : []),
       "-c", 'web_search="disabled"',
       "-c", "project_doc_max_bytes=0",
       "-c", "check_for_update_on_startup=false",
@@ -4086,6 +4121,12 @@ ${disableUnboundedConnectionRetries ? '      "--disable", "unbounded_connection_
         HOME: directory,
         CODEX_HOME: process.env.CODEX_HOME,
         RUST_LOG: "error",
+        // The custom model provider reads its credential from this environment
+        // variable; the value stays the supervisor's resolve reference, and the
+        // network boundary substitutes the real credential on the wire.
+        ...(typeof modelCredentialReference === "string" && modelCredentialReference.length > 0
+          ? { OPENAI_API_KEY: modelCredentialReference }
+          : {}),
         ...Object.fromEntries(
           ["SSL_CERT_FILE", "SSL_CERT_DIR"]
             .filter((name) => typeof process.env[name] === "string" && process.env[name].length > 0)

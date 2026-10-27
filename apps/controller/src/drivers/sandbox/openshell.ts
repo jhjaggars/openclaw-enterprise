@@ -3560,29 +3560,30 @@ export class OpenShellSandboxDriver implements SandboxDriver {
             runtimeCredentialMaterial.binding,
           )
         : sandboxSpec(
-              this.options,
-              context.revision,
-              context.requirements,
-              runtimeProvider,
-              new Set([
-                WORKSPACE_NODE_SETUP_ENVIRONMENT,
-                WORKSPACE_NODE_CA_ENVIRONMENT,
-                managedGoogleCredentialEnvironment,
-                ...(!codex
-                  ? Object.values(managedGoogleInstall.credentials).map((slot) => slot.delivery.env)
-                  : []),
-                // Only the attached provider supplies its identity-bound credential alias.
-                // A static placeholder would survive withdrawal and shadow its absence.
-                ...(context.requirements.loginMode === "chatgptAuthTokens"
-                  ? ["CODEX_ACCESS_TOKEN"]
-                  : []),
-                ...Object.keys(runtimeCredentialMaterial.credentials),
-                ...(git ? ["GITHUB_TOKEN"] : []),
-              ]),
-              runtimeCredentialMaterial.binding,
-              egressPolicy,
-              plugin,
-          ),      serviceExposures,
+            this.options,
+            context.revision,
+            context.requirements,
+            runtimeProvider,
+            new Set([
+              WORKSPACE_NODE_SETUP_ENVIRONMENT,
+              WORKSPACE_NODE_CA_ENVIRONMENT,
+              managedGoogleCredentialEnvironment,
+              ...(!codex
+                ? Object.values(managedGoogleInstall.credentials).map((slot) => slot.delivery.env)
+                : []),
+              // Only the attached provider supplies its identity-bound credential alias.
+              // A static placeholder would survive withdrawal and shadow its absence.
+              ...(context.requirements.loginMode === "chatgptAuthTokens"
+                ? ["CODEX_ACCESS_TOKEN"]
+                : []),
+              ...Object.keys(runtimeCredentialMaterial.credentials),
+              ...(git ? ["GITHUB_TOKEN"] : []),
+            ]),
+            runtimeCredentialMaterial.binding,
+            egressPolicy,
+            plugin,
+          ),
+      serviceExposures,
     };
     if (git && this.options.gateway.workspaceMode === "operator") {
       const operatorSpec = create.spec as ReturnType<typeof sandboxSpec>;
@@ -3728,7 +3729,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       // The managed spec has no network middlewares; only the operator spec carries
       // Google workspace policies, so the reconciliation reads that shape.
       const previous = googleRequestPolicyFromSandbox(
-        existing.spec?.policy as ReturnType<typeof sandboxSpec>['policy'],
+        existing.spec?.policy as ReturnType<typeof sandboxSpec>["policy"],
       );
       if (previous) {
         expectedSpec = {

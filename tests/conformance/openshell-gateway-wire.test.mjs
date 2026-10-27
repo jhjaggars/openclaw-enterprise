@@ -3296,4 +3296,3 @@ test("OpenShell client fails the gateway call when the OIDC token endpoint rejec
     await rm(directory, { recursive: true, force: true });
   }
 });
-

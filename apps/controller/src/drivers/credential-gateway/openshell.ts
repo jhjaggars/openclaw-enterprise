@@ -44,7 +44,6 @@ import { normalizeOpenAiBaseUrl, openAiBaseUrlSpellingMessage } from "../openai-
 import {
   openShellProviderName,
   openShellWorkspaceKey,
-  openShellWorkspaceName,
   type OpenShellGateway,
   type OpenShellGatewayPlacement,
 } from "../../backends/openshell.ts";

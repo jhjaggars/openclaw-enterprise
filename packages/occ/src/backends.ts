@@ -476,7 +476,10 @@ function validateOpenShellBackend(
     throw new ScopeViolationError(path(id, "configuration.auth") + " mtls requires HTTPS.");
   }
   const protectedTransport =
-    tls && (auth?.mode === "bearerTokenFile" || auth?.mode === "mtls" || auth?.mode === "oidcClientCredentials");
+    tls &&
+    (auth?.mode === "bearerTokenFile" ||
+      auth?.mode === "mtls" ||
+      auth?.mode === "oidcClientCredentials");
   if (!protectedTransport && insecureTransport === undefined) {
     throw new ScopeViolationError(
       path(id, "configuration") +
