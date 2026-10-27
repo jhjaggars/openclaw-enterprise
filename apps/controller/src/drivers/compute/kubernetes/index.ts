@@ -3969,6 +3969,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<ComputeReadiness> {
+    if (process.env.OCC_DEBUG_PREPARE === "1") {
+      process.stderr.write(
+        `[PREPARE] rev=${revision.id.slice(0, 12)} ns=${revision.namespaceId.slice(0, 8)} harness=${revision.harness.mode}/${revision.harness.id}\n`,
+      );
+    }
     this.lifecycleStarted = true;
     const result = {
       namespaceId: revision.namespaceId,
@@ -3982,6 +3987,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
       typeof revision.servicePrincipalId !== "string" ||
       revision.servicePrincipalId.trim().length === 0
     ) {
+      if (process.env.OCC_DEBUG_PREPARE === "1")
+        process.stderr.write("[PREPARE] early: compute mismatch\n");
       return result;
     }
     required(revision.agentId, "Agent ID");
@@ -4053,10 +4060,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const tenantOwnership = { namespaceId: revision.namespaceId };
     const observed = await this.getNamespace(namespace);
     if (observed === undefined) {
+      if (process.env.OCC_DEBUG_PREPARE === "1")
+        process.stderr.write("[PREPARE] early: namespace not found\n");
       return result;
     }
     this.verifyNamespaceOwnership(observed, tenantOwnership, external);
     if (observed.status?.phase !== "Active") {
+      if (process.env.OCC_DEBUG_PREPARE === "1")
+        process.stderr.write(`[PREPARE] early: namespace phase=${observed.status?.phase}\n`);
       return result;
     }
     const policyNamespaces =
@@ -4073,6 +4084,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
           tenantOwnership,
         );
         if (existing === undefined) {
+          if (process.env.OCC_DEBUG_PREPARE === "1")
+            process.stderr.write(
+              `[PREPARE] early: missing policy ${policy.metadata.name} in ${policyNamespace}\n`,
+            );
           return result;
         }
         if (policy.metadata.name === "allow-dns") {

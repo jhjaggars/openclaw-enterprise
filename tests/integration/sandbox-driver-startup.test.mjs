@@ -47,18 +47,6 @@ function sandboxInstallation() {
   configuration.drivers.sandbox = {
     id: "openshell-sandbox",
     configuration: {
-      gateway: {
-        workspaceMode: "operator",
-      },
-      kubernetes: {
-        runtimeClassName: "openshell-sandbox",
-        serviceAccount: { mode: "gatewayConfigured" },
-        sandboxDataMount: {
-          subPath: "workspace",
-          mountPath: "/sandbox/enterprise",
-          readOnly: false,
-        },
-      },
       policy: {
         process: { runAsUser: "1000", runAsGroup: "1000" },
         networkPolicies: [
@@ -419,13 +407,12 @@ test("startup rejects an OpenShell Backend whose members are not both selected",
     /drivers\.sandbox must match the selected bundled OpenShell drivers\.sandbox\.id/,
   );
 
-  // Connection settings belong to the Backend; the Sandbox rejects them instead of ignoring them.
+  // Connection settings belong to the Backend; the Sandbox rejects them via closed schema.
   const legacyEndpoint = sandboxInstallation();
-  legacyEndpoint.drivers.sandbox.configuration.gateway.endpoint = "http://127.0.0.1:1";
-  await assert.rejects(
-    loadInstallationFile(t, legacyEndpoint),
-    /OpenShell gateway option endpoint belongs to the openshell Backend/,
-  );
+  legacyEndpoint.drivers.sandbox.configuration.gateway = {
+    endpoint: "http://127.0.0.1:1",
+  };
+  await assert.rejects(loadInstallationFile(t, legacyEndpoint), /schema is false/);
 });
 
 test("startup requires protected OpenShell transport or an explicit NetworkPolicy boundary", async (t) => {
@@ -652,7 +639,8 @@ test("OpenShell provisions native OpenClaw without exposing an inbound Harness s
     requests[0].spec.command[RUNTIME_WRAPPER_COMMAND.length],
     /OpenShell workspace link conflicts/,
   );
-  assert.deepEqual(requests[0].labels, labels);
+  // The gateway owns sandbox Pod infrastructure; OCC sends no labels.
+  assert.deepEqual(requests[0].labels, {});
   assert.equal(requests[0].spec.environment.TMPDIR, "/tmp");
   assert.equal(requests[0].spec.policy.filesystem.include_workdir, false);
   assert.deepEqual(requests[0].spec.policy.filesystem.read_only, ["/app"]);
@@ -1157,19 +1145,10 @@ test("OpenShell provisions dedicated Codex with bearer passthrough and provider 
   assert.equal(requests[0].spec.environment.TMPDIR, "/tmp");
   assert.equal(requests[0].spec.environment.CODEX_HOME, "/sandbox/.openclaw-runtime/home/.codex");
   const nodeStateDirectory = requests[0].spec.environment.OPENCLAW_NODE_STATE_DIR;
-  assert.match(nodeStateDirectory, /^\/sandbox\/\.openclaw-mounts\/[a-f0-9]{16}\/state$/u);
+  assert.equal(nodeStateDirectory, "/sandbox/.openclaw-runtime/home/.openclaw-node");
   assert.equal(requests[0].spec.environment.OPENCLAW_WORKSPACE_DIR, "/sandbox/enterprise");
-  const kubernetesDriver =
-    requests[0].spec.template.driver_config.fields.kubernetes.structValue.fields;
-  const agentContainer = kubernetesDriver.containers.structValue.fields.agent.structValue.fields;
-  assert.deepEqual(
-    agentContainer.resources.structValue.fields.requests.structValue.fields["ephemeral-storage"],
-    { stringValue: "256Mi" },
-  );
-  assert.deepEqual(
-    agentContainer.resources.structValue.fields.limits.structValue.fields["ephemeral-storage"],
-    { stringValue: "1Gi" },
-  );
+  // The gateway owns sandbox Pod infrastructure; no driver_config is sent.
+  assert.equal(requests[0].spec.template.driver_config, undefined);
   assert.equal(
     agentContainer.volume_mounts.listValue.values.some(
       ({ structValue }) => structValue.fields.mount_path?.stringValue === "/home/node/workspace",
@@ -1623,51 +1602,9 @@ test("OpenShell Namespace lifecycle creates, adopts, and deletes its exact opera
   assert.deepEqual(gatewayClient.calls.at(-1), ["deleteWorkspace", context.namespace.name]);
 });
 
-test("OpenShell operator mode owns workspace chart resources around the Workspace lifecycle", async () => {
+test("OpenShell reconciles its Workspace without touching Kubernetes", async () => {
   const events = [];
   const configuration = sandboxInstallation().drivers.sandbox.configuration;
-  configuration.gateway.operatorWorkspaceResources = [
-    {
-      apiVersion: "v1",
-      kind: "ServiceAccount",
-      metadata: { name: "openshell-sandbox" },
-    },
-  ];
-  const gatewayClient = workspaceGatewayClient([], events);
-  const driver = new OpenShellSandboxDriver(configuration, {
-    id: "openshell-sandbox",
-    implementation: "openshell",
-    backend: backendFor(gatewayClient),
-  });
-  const context = namespaceContext();
-  context.kubernetes = kubernetesObjectClient(events);
-
-  // The Gateway must not observe a Workspace until its operator-mode RBAC and
-  // ServiceAccount resources have converged in the Compute-owned namespace.
-  await driver.ensureNamespace(context);
-  assert.deepEqual(events, [
-    ["kubernetes", "patch", "ServiceAccount", "openshell-sandbox", context.namespace.name],
-    ["gateway", "health"],
-    ["gateway", "getWorkspace", context.namespace.name],
-    ["gateway", "createWorkspace", context.namespace.name],
-  ]);
-
-  events.length = 0;
-  await driver.cleanup(context);
-  assert.deepEqual(events, [
-    ["gateway", "getWorkspace", context.namespace.name],
-    ["gateway", "deleteWorkspace", context.namespace.name],
-    ["kubernetes", "delete", "ServiceAccount", "openshell-sandbox", context.namespace.name],
-  ]);
-});
-
-test("OpenShell managed mode reconciles its Workspace without touching Kubernetes", async () => {
-  const events = [];
-  const configuration = sandboxInstallation().drivers.sandbox.configuration;
-  configuration.gateway.workspaceMode = "managed";
-  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount"]) {
-    delete configuration.kubernetes[key];
-  }
   const gatewayClient = workspaceGatewayClient([], events);
   const driver = new OpenShellSandboxDriver(configuration, {
     id: "openshell-sandbox",
@@ -1708,77 +1645,8 @@ test("OpenShell managed mode reconciles its Workspace without touching Kubernete
   assert.equal(gatewayClient.workspaces.has(context.namespace.name), false);
 });
 
-test("OpenShell managed mode rejects operator-only workspace options", async (t) => {
-  const load = (configuration) => loadInstallationFile(t, configuration);
-  const base = sandboxInstallation();
-  base.drivers.sandbox.configuration.gateway.workspaceMode = "managed";
-  delete base.drivers.sandbox.configuration.gateway.operatorNamespaceLabels;
-  delete base.drivers.sandbox.configuration.gateway.networkPolicyResources;
-  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount"]) {
-    delete base.drivers.sandbox.configuration.kubernetes[key];
-  }
-  await load(base);
-  for (const [key, value] of [
-    ["operatorNamespaceLabels", { "openshell.ai/openclaw-workspace": "true" }],
-    ["readiness", { serviceName: "openshell-gateway", podSelector: { app: "openshell" } }],
-    ["runtimeClassName", "openshell-sandbox"],
-    ["serviceAccount", { mode: "gatewayConfigured" }],
-    [
-      "sandboxDataMount",
-      { subPath: "workspace", mountPath: "/sandbox/enterprise", readOnly: false },
-    ],
-    ["userNamespaces", true],
-    ["agentResources", { requests: { cpu: "1" } }],
-    [
-      "operatorWorkspaceResources",
-      [{ apiVersion: "v1", kind: "ServiceAccount", metadata: { name: "openshell-sandbox" } }],
-    ],
-    [
-      "networkPolicyResources",
-      [
-        {
-          apiVersion: "networking.k8s.io/v1",
-          kind: "NetworkPolicy",
-          metadata: { name: "allow-callback" },
-        },
-      ],
-    ],
-  ]) {
-    const rejected = sandboxInstallation();
-    rejected.drivers.sandbox.configuration.gateway.workspaceMode = "managed";
-    delete rejected.drivers.sandbox.configuration.gateway.operatorNamespaceLabels;
-    delete rejected.drivers.sandbox.configuration.gateway.networkPolicyResources;
-    for (const kubernetesKey of ["runtimeClassName", "serviceAccount", "sandboxDataMount"]) {
-      delete rejected.drivers.sandbox.configuration.kubernetes[kubernetesKey];
-    }
-    if (
-      [
-        "runtimeClassName",
-        "serviceAccount",
-        "sandboxDataMount",
-        "userNamespaces",
-        "agentResources",
-      ].includes(key)
-    ) {
-      rejected.drivers.sandbox.configuration.kubernetes[key] = value;
-    } else {
-      rejected.drivers.sandbox.configuration.gateway[key] = value;
-    }
-    await assert.rejects(
-      load(rejected),
-      new RegExp(
-        `(gateway|kubernetes) option ${key} applies to operator workspace mode; in managed mode the gateway owns the (workspace resources|sandbox Pod infrastructure)`,
-      ),
-    );
-  }
-});
-
-test("OpenShell managed mode provisions a Sandbox without OCC-owned pod infrastructure", async () => {
+test("OpenShell provisions a Sandbox without OCC-owned pod infrastructure", async () => {
   const configuration = sandboxInstallation().drivers.sandbox.configuration;
-  configuration.gateway.workspaceMode = "managed";
-  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount"]) {
-    delete configuration.kubernetes[key];
-  }
   const gatewayClient = workspaceGatewayClient();
   const creates = [];
   gatewayClient.createSandbox = async (request) => {
@@ -1855,51 +1723,6 @@ test("OpenShell managed mode provisions a Sandbox without OCC-owned pod infrastr
   });
   gatewayClient.getService = async () => undefined;
   assert.equal(await driver.harnessReady(harnessContext), false);
-});
-
-test("OpenShell managed mode realizes workspace mounts on the gateway volume", async () => {
-  const configuration = sandboxInstallation().drivers.sandbox.configuration;
-  configuration.gateway.workspaceMode = "managed";
-  for (const key of ["runtimeClassName", "serviceAccount", "sandboxDataMount"]) {
-    delete configuration.kubernetes[key];
-  }
-  const gatewayClient = workspaceGatewayClient();
-  const creates = [];
-  gatewayClient.createSandbox = async (request) => {
-    creates.push(structuredClone(request));
-    return {
-      name: request.name,
-      phase: "SANDBOX_PHASE_READY",
-      serviceUrls: { "": "https://sandbox-service.example.test:9443/" },
-    };
-  };
-  gatewayClient.getService = async () => ({
-    targetPort: 8080,
-    authorizationMode: "SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH",
-    url: "https://sandbox-service.example.test:9443/",
-  });
-  const driver = new OpenShellSandboxDriver(configuration, {
-    id: "openshell-sandbox",
-    implementation: "openshell",
-    backend: backendFor(gatewayClient),
-  });
-  const fixture = codexSandboxFixture(driver);
-  // The fixture's default workspace mounts are Compute-owned PVCs; a managed
-  // Sandbox realizes them as the runtime-home layout on the gateway's persistent
-  // workspace volume instead of volume mounts — no PVC entries cross the boundary.
-  await driver.provisionHarness({
-    ...fixture.context,
-    revision: fixture.revision,
-    requirements: fixture.requirements,
-  });
-  const spec = creates[0].spec;
-  assert.equal(spec.template.driver_config, undefined);
-  assert.equal(
-    spec.environment.OPENCLAW_NODE_STATE_DIR,
-    "/sandbox/.openclaw-runtime/home/.openclaw-node",
-  );
-  assert.equal(spec.environment.CODEX_HOME, "/sandbox/.openclaw-runtime/home/.codex");
-  assert.equal(spec.environment.OPENCLAW_WORKSPACE_DIR, "/sandbox/enterprise");
 });
 
 test("OpenShell Namespace cleanup refuses a same-name foreign Workspace", async () => {
@@ -2008,35 +1831,6 @@ test("startup rejects the deprecated OpenShell passthrough spelling", async (t) 
   );
 });
 
-test("startup rejects the removed per-Sandbox OpenShell ServiceAccount mode", async (t) => {
-  const configuration = sandboxInstallation();
-  configuration.drivers.sandbox.configuration.kubernetes.serviceAccount.mode = "driverConfig";
-
-  await assert.rejects(
-    loadInstallationFile(t, configuration),
-    /OpenShell serviceAccount mode must be gatewayConfigured/,
-  );
-});
-
-test("startup rejects an invalid OpenShell gateway readiness wait", async (t) => {
-  const configuration = sandboxInstallation();
-  configuration.drivers.sandbox.configuration.gateway.readiness = {
-    serviceName: "openshell-gateway",
-    podSelector: { "app.kubernetes.io/name": "openshell" },
-    timeoutMs: 0,
-  };
-
-  await assert.rejects(
-    loadInstallationFile(t, configuration),
-    /OpenShell gateway readiness timeout must be a positive safe integer/,
-  );
-});
-
-/**
- * The OpenShell Credential Gateway over a recording provider store. Each provider's labels say
- * which credential source owns it; the gateway may act only on its own source's provider.
- * Kept beside the OpenShell Sandbox cases: both members come from one OpenShell Backend.
- */
 function credentialGatewayOverProviders({ keepDeleted = false } = {}) {
   const providers = new Map();
   const calls = [];
@@ -2112,6 +1906,73 @@ function credentialGatewayOverProviders({ keepDeleted = false } = {}) {
   };
 }
 
+test("the OpenShell Credential Gateway acts only on its own source's provider", async () => {
+  const { calls, context, driver, input, providers, revisionContext, source } =
+    credentialGatewayOverProviders();
+  const owner = "cs_00000000-0000-4000-8000-0000000000b1";
+  const other = "cs_00000000-0000-4000-8000-0000000000b2";
+  assert.deepEqual(await driver.registerSource(context(owner), input()), { state: "ready" });
+  const [stored] = providers.values();
+  assert.equal(stored.labels["openclaw.dev/credential-source-id"], owner);
+  // Another source's provider stored under this source's name: same manager and type, other id.
+  providers.set(stored.name, {
+    ...stored,
+    labels: { ...stored.labels, "openclaw.dev/credential-source-id": other },
+  });
+  calls.length = 0;
+  await assert.rejects(driver.registerSource(context(owner), input()), ScopeViolationError);
+  await assert.rejects(
+    driver.updateSource(context(owner), input("replacement")),
+    ScopeViolationError,
+  );
+  assert.equal((await driver.sourceStatus(context(owner))).state, "failed");
+  await assert.rejects(driver.removeSource(context(owner)), ScopeViolationError);
+  await assert.rejects(
+    driver.attachForRevision(revisionContext([source(owner)])),
+    /provider for a bound credential source is unavailable/,
+  );
+  // Only the replayed create reached the store, and it was refused; nothing was overwritten.
+  assert.deepEqual(
+    calls.map(([operation]) => operation),
+    ["createProvider"],
+  );
+  assert.deepEqual(providers.get(stored.name).credentials, stored.credentials);
+});
+
+test("the OpenShell Credential Gateway never attaches a source of another Namespace", async () => {
+  const { context, driver, input, revisionContext, source } = credentialGatewayOverProviders();
+  const owner = "cs_00000000-0000-4000-8000-0000000000c1";
+  await driver.registerSource(context(owner), input());
+  // The provider is genuinely owned, so only the Namespace check can refuse.
+  const foreign = source(owner, "ns_00000000-0000-4000-8000-0000000000ff");
+  await assert.rejects(
+    driver.attachForRevision(revisionContext([foreign])),
+    (error) =>
+      error instanceof ScopeViolationError &&
+      error.message === "The credential source is not owned by this gateway.",
+  );
+  assert.equal((await driver.attachForRevision(revisionContext([source(owner)]))).length, 1);
+});
+
+test("the OpenShell Credential Gateway refuses an empty secret before creating a provider", async () => {
+  const { calls, context, driver, input, providers } = credentialGatewayOverProviders();
+  await assert.rejects(
+    driver.registerSource(context("cs_00000000-0000-4000-8000-0000000000d1"), input("")),
+    ScopeViolationError,
+  );
+  assert.deepEqual(calls, []);
+  assert.equal(providers.size, 0);
+});
+
+test("OpenShell credential source removal fails while the provider survives deletion", async () => {
+  const { context, driver, input, providers } = credentialGatewayOverProviders({
+    keepDeleted: true,
+  });
+  const owner = "cs_00000000-0000-4000-8000-0000000000e1";
+  await driver.registerSource(context(owner), input());
+  await assert.rejects(driver.removeSource(context(owner)), /was not deleted/);
+  assert.equal(providers.size, 1);
+});
 test("the OpenShell Credential Gateway acts only on its own source's provider", async () => {
   const { calls, context, driver, input, providers, revisionContext, source } =
     credentialGatewayOverProviders();

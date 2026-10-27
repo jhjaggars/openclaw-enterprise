@@ -1,5 +1,5 @@
 import { asRecord, isNonEmptyString, sha256Hex } from "@openclaw-enterprise/utils";
-import { KubernetesObjectApi, type KubernetesObject, PatchStrategy } from "@kubernetes/client-node";
+import { KubernetesObjectApi } from "@kubernetes/client-node";
 import {
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
@@ -74,35 +74,6 @@ export interface OpenShellNetworkBinary {
 }
 
 export interface OpenShellSandboxDriverOptions {
-  /** Workspace and readiness policy; the `openshell` Backend owns the gateway connection. */
-  readonly gateway: {
-    readonly workspaceMode: "managed" | "operator";
-    readonly operatorNamespaceLabels?: Readonly<Record<string, string>>;
-    readonly readiness?: {
-      readonly serviceName: string;
-      readonly podSelector: Readonly<Record<string, string>>;
-      readonly timeoutMs?: number;
-      readonly pollIntervalMs?: number;
-    };
-    readonly operatorWorkspaceResources?: readonly KubernetesNamespacedResource[];
-    readonly networkPolicyResources?: readonly KubernetesNamespacedResource[];
-  };
-  readonly kubernetes: {
-    /** Operator mode only; the gateway's default applies in managed mode. */
-    readonly runtimeClassName?: string;
-    /** Operator mode only; the gateway configures the sandbox ServiceAccount in managed mode. */
-    readonly serviceAccount?: { readonly mode: "gatewayConfigured" };
-    /** Operator mode only; the gateway's workspace volume backs /sandbox in managed mode. */
-    readonly sandboxDataMount?: {
-      readonly claimName?: string;
-      readonly subPath: string;
-      readonly mountPath: string;
-      readonly readOnly: boolean;
-    };
-    readonly agentResources?: ConfigurationRecord;
-    /** Operator mode only; the gateway decides user-namespace support in managed mode. */
-    readonly userNamespaces?: boolean;
-  };
   readonly policy: {
     readonly filesystem?: {
       readonly includeWorkdir?: boolean;
@@ -260,40 +231,6 @@ function port(value: unknown, description: string): number {
   return Number(value);
 }
 
-function validateKubernetesResource(value: unknown, path: string): void {
-  const resource = asRecord(value);
-  const metadata = asRecord(resource?.metadata);
-  if (
-    resource === undefined ||
-    typeof resource.apiVersion !== "string" ||
-    typeof resource.kind !== "string" ||
-    metadata === undefined ||
-    typeof metadata.name !== "string" ||
-    metadata.name.trim().length === 0
-  ) {
-    throw new OpenShellSandboxConfigurationFailure(`${path} must be a Kubernetes resource object.`);
-  }
-  if (resource.kind === "Secret") {
-    throw new OpenShellSandboxConfigurationFailure(
-      `${path} must not contain OpenShell credential-bearing Secrets.`,
-    );
-  }
-}
-
-function validateOperatorWorkspaceResource(value: unknown, path: string): void {
-  validateKubernetesResource(value, path);
-  const resource = value as KubernetesNamespacedResource;
-  const expected =
-    OPERATOR_WORKSPACE_RESOURCE_VERSIONS[
-      resource.kind as keyof typeof OPERATOR_WORKSPACE_RESOURCE_VERSIONS
-    ];
-  if (expected === undefined || resource.apiVersion !== expected) {
-    throw new OpenShellSandboxConfigurationFailure(
-      `${path} must be a workspace-chart ServiceAccount, Role, RoleBinding, or NetworkPolicy.`,
-    );
-  }
-}
-
 function validateWorkspaceMount(mount: {
   readonly claimName: string;
   readonly subPath: string;
@@ -311,34 +248,6 @@ function validateWorkspaceMount(mount: {
   }
   if (typeof mount.readOnly !== "boolean") {
     throw new OpenShellSandboxConfigurationFailure("Workspace mount readOnly must be explicit.");
-  }
-}
-
-function validateSandboxDataMount(mount: {
-  readonly claimName?: string;
-  readonly subPath: string;
-  readonly mountPath: string;
-  readonly readOnly: boolean;
-}): void {
-  if (mount.claimName !== undefined) {
-    nonempty(mount.claimName, "OpenShell sandboxDataMount claimName");
-  }
-  const subPath = nonempty(mount.subPath, "OpenShell sandboxDataMount subPath");
-  if (subPath === "." || subPath === "/" || subPath.startsWith("/") || subPath.includes("..")) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell sandboxDataMount must use an exact PVC subpath.",
-    );
-  }
-  const mountPath = nonempty(mount.mountPath, "OpenShell sandboxDataMount mountPath");
-  if (!mountPath.startsWith("/sandbox/")) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell sandboxDataMount must mount an approved PVC subpath under /sandbox.",
-    );
-  }
-  if (typeof mount.readOnly !== "boolean") {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell sandboxDataMount readOnly must be explicit.",
-    );
   }
 }
 
@@ -562,6 +471,15 @@ interface CodexRuntimeCredentialMaterial {
   readonly credentialExpirationTimes: Readonly<Record<string, string>>;
   readonly config: Readonly<Record<string, string>>;
   readonly binding?: WorkspaceNodeBinding;
+}
+
+function kubernetes(context: SandboxNamespaceContext): KubernetesObjectApi {
+  if (!(context.kubernetes instanceof KubernetesObjectApi)) {
+    throw new OpenShellSandboxConfigurationFailure(
+      "OpenShell requires the Compute Driver's native Kubernetes object client.",
+    );
+  }
+  return context.kubernetes;
 }
 
 async function codexRuntimeCredentials(
@@ -789,141 +707,6 @@ function verifyActiveWorkspace(
   }
 }
 
-function resourceNamespace(resource: KubernetesNamespacedResource): string | undefined {
-  const namespace = asRecord(resource.metadata)?.namespace;
-  return typeof namespace === "string" && namespace.trim().length > 0 ? namespace : undefined;
-}
-
-function resourceReference(resource: KubernetesNamespacedResource, namespace: string) {
-  return {
-    apiVersion: nonempty(resource.apiVersion, "Kubernetes resource apiVersion"),
-    kind: nonempty(resource.kind, "Kubernetes resource kind"),
-    metadata: {
-      namespace,
-      name: nonempty(asRecord(resource.metadata)?.name, "Kubernetes resource name"),
-    },
-  };
-}
-
-function withNamespace(
-  resource: KubernetesNamespacedResource,
-  context: SandboxNamespaceContext,
-): KubernetesObject {
-  const namespace = namespaceName(context.namespace);
-  const current = resourceNamespace(resource);
-  if (current !== undefined && current !== namespace) {
-    throw new OpenShellSandboxConfigurationFailure(
-      `OpenShell resource ${resource.kind}/${asRecord(resource.metadata)?.name} targets namespace ${current}, not ${namespace}.`,
-    );
-  }
-  const metadata = asRecord(resource.metadata);
-  const resourceLabels = asRecord(metadata?.labels);
-  const resourceAnnotations = asRecord(metadata?.annotations);
-  const namespaceId = context.namespace.id;
-  if (
-    (resourceLabels?.["openclaw.dev/namespace"] !== undefined &&
-      resourceLabels["openclaw.dev/namespace"] !== namespaceId) ||
-    (resourceAnnotations?.["openclaw.dev/namespace-id"] !== undefined &&
-      resourceAnnotations["openclaw.dev/namespace-id"] !== namespaceId)
-  ) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell bootstrap resource belongs to another Namespace.",
-    );
-  }
-  return {
-    ...resource,
-    apiVersion: nonempty(resource.apiVersion, "Kubernetes resource apiVersion"),
-    kind: nonempty(resource.kind, "Kubernetes resource kind"),
-    metadata: {
-      ...metadata,
-      name: nonempty(metadata?.name, "Kubernetes resource name"),
-      namespace,
-      labels: {
-        ...resourceLabels,
-        "app.kubernetes.io/managed-by": "openclaw-enterprise",
-        "openclaw.dev/namespace": namespaceId,
-      },
-      annotations: {
-        ...resourceAnnotations,
-        "openclaw.dev/namespace-id": namespaceId,
-      },
-    },
-  };
-}
-
-function kubernetes(context: SandboxNamespaceContext): KubernetesObjectApi {
-  if (!(context.kubernetes instanceof KubernetesObjectApi)) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell requires the Compute Driver's native Kubernetes object client.",
-    );
-  }
-  return context.kubernetes;
-}
-
-function missingResource(error: unknown): boolean {
-  const observed = asRecord(error);
-  const response = asRecord(observed?.response);
-  return [observed?.code, observed?.statusCode, response?.statusCode, response?.status].includes(
-    404,
-  );
-}
-
-async function applyResources(
-  context: SandboxNamespaceContext,
-  resources: readonly KubernetesNamespacedResource[] | undefined,
-): Promise<void> {
-  for (const resource of resources ?? []) {
-    await kubernetes(context).patch(
-      withNamespace(resource, context),
-      undefined,
-      undefined,
-      "openclaw-enterprise-sandbox",
-      false,
-      PatchStrategy.ServerSideApply,
-    );
-  }
-}
-
-async function applyOperatorNamespaceLabels(
-  context: SandboxNamespaceContext,
-  desired: Readonly<Record<string, string>> | undefined,
-): Promise<void> {
-  if (desired === undefined) {
-    return;
-  }
-  const name = namespaceName(context.namespace);
-  const existing = await kubernetes(context).read({
-    apiVersion: "v1",
-    kind: "Namespace",
-    metadata: { name },
-  });
-  if (existing === undefined) {
-    throw new OpenShellSandboxConfigurationFailure(
-      `OpenShell operator Namespace ${name} is unavailable.`,
-    );
-  }
-  const current = asRecord(existing.metadata?.labels) ?? {};
-  for (const [key, value] of Object.entries(desired)) {
-    if (current[key] !== undefined && current[key] !== value) {
-      throw new OpenShellSandboxConfigurationFailure(
-        `OpenShell operator Namespace label ${key} is owned with another value.`,
-      );
-    }
-  }
-  await kubernetes(context).patch(
-    {
-      apiVersion: "v1",
-      kind: "Namespace",
-      metadata: { name, labels: { ...desired } },
-    },
-    undefined,
-    undefined,
-    "openclaw-enterprise-sandbox",
-    false,
-    PatchStrategy.ServerSideApply,
-  );
-}
-
 function labelSelector(selector: Readonly<Record<string, string>>): string {
   return Object.entries(selector)
     .map(([key, value]) => `${key}=${value}`)
@@ -939,50 +722,6 @@ function podReady(pod: ConfigurationRecord): boolean {
   });
 }
 
-async function waitForGatewayReadiness(
-  context: SandboxNamespaceContext,
-  readiness: NonNullable<OpenShellSandboxDriverOptions["gateway"]["readiness"]>,
-): Promise<void> {
-  const namespace = namespaceName(context.namespace);
-  const deadline = Date.now() + (readiness.timeoutMs ?? 0);
-  const pollIntervalMs = readiness.pollIntervalMs ?? 1_000;
-  let unavailable = "OpenShell gateway Service is unavailable.";
-  for (;;) {
-    let service: KubernetesObject | undefined;
-    try {
-      service = await kubernetes(context).read({
-        apiVersion: "v1",
-        kind: "Service",
-        metadata: { namespace, name: readiness.serviceName },
-      });
-    } catch (error) {
-      if (!missingResource(error)) {
-        throw error;
-      }
-    }
-    if (service !== undefined) {
-      const pods = await kubernetes(context).list(
-        "v1",
-        "Pod",
-        namespace,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        labelSelector(readiness.podSelector),
-      );
-      if (pods.items.some((pod) => podReady(pod as ConfigurationRecord))) {
-        return;
-      }
-      unavailable = "OpenShell gateway Pod is not ready.";
-    }
-    if (Date.now() >= deadline) {
-      throw new OpenShellSandboxConfigurationFailure(unavailable);
-    }
-    await delay(pollIntervalMs, undefined, { signal: context.signal });
-  }
-}
-
 function workspaceVolumeName(claimName: string): string {
   return `workspace-${sha256Hex(claimName, 12)}`;
 }
@@ -990,17 +729,6 @@ function workspaceVolumeName(claimName: string): string {
 interface OpenShellWorkspaceLink {
   readonly path: string;
   readonly target: string;
-}
-
-function relocatedWorkspaceMountPath(mount: {
-  readonly claimName: string;
-  readonly subPath: string;
-  readonly mountPath: string;
-}): string {
-  return `${OPENSHELL_WORKSPACE_MOUNTS}/${sha256Hex(
-    JSON.stringify([mount.claimName, mount.subPath, mount.mountPath]),
-    16,
-  )}`;
 }
 
 function sandboxCommand(
@@ -1027,136 +755,6 @@ function sandboxCommand(
     `${bootstrap}${loader}`,
     ...command.slice(loaderIndex + 1),
   ];
-}
-
-function workspaceVolumeMounts(
-  requirements: HarnessWorkloadRequirements,
-  dataMount: { readonly name: string; readonly mount_path: string; readonly sub_path: string },
-  revisionId: string,
-) {
-  const volumes = new Map<string, { readonly claimName: string; readOnly: boolean }>();
-  const links: OpenShellWorkspaceLink[] = [];
-  const environmentPaths = new Set(
-    requirements.environment.flatMap((entry) => ("value" in entry ? [entry.value] : [])),
-  );
-  const workspaceMountPaths = new Map<string, string>();
-  const runtimePaths: string[] = [];
-  const mounts = requirements.workspaceMounts.map((mount) => {
-    validateWorkspaceMount(mount);
-    const name = workspaceVolumeName(mount.claimName);
-    const existing = volumes.get(name);
-    if (existing === undefined) {
-      volumes.set(name, { claimName: mount.claimName, readOnly: mount.readOnly });
-    } else if (!mount.readOnly) {
-      volumes.set(name, { ...existing, readOnly: false });
-    }
-    const homeMount = mount.mountPath.match(/^\/home\/node\/(.+)$/u);
-    const isDataMount = name === dataMount.name && mount.subPath === dataMount.sub_path;
-    const mountPath = isDataMount
-      ? dataMount.mount_path
-      : homeMount === null
-        ? mount.mountPath
-        : relocatedWorkspaceMountPath(mount);
-    if (homeMount !== null) {
-      const runtimePath = `${OPENSHELL_HOME}/${homeMount[1]}`;
-      runtimePaths.push(runtimePath);
-      if (environmentPaths.has(mount.mountPath)) {
-        // OpenShell's user namespace presents the volume root as root-owned.
-        // Point chmod-sensitive application state at a process-created child,
-        // while retaining the admitted PVC subpath as its durable parent.
-        workspaceMountPaths.set(
-          mount.mountPath,
-          `${mountPath}/${OPENSHELL_WORKSPACE_STATE_DIRECTORY}`,
-        );
-      } else {
-        links.push({ path: runtimePath, target: mountPath });
-      }
-    }
-    return {
-      name,
-      mount_path: mountPath,
-      sub_path: mount.subPath,
-      read_only: mount.readOnly,
-    };
-  });
-  mounts.unshift({
-    name: dataMount.name,
-    mount_path: OPENSHELL_RUNTIME_ROOT,
-    sub_path: `openshell-runtime-${sha256Hex(revisionId, 16)}`,
-    read_only: false,
-  });
-  const distinctRuntimePaths = new Set(runtimePaths);
-  if (
-    distinctRuntimePaths.size !== runtimePaths.length ||
-    runtimePaths.some((path) =>
-      runtimePaths.some((candidate) => candidate !== path && candidate.startsWith(`${path}/`)),
-    )
-  ) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell workspace mounts must not overlap beneath the runtime home.",
-    );
-  }
-  return {
-    volumes: Array.from(volumes.values(), (volume) => ({
-      name: workspaceVolumeName(volume.claimName),
-      persistent_volume_claim: {
-        claim_name: volume.claimName,
-        read_only: volume.readOnly,
-      },
-    })),
-    mounts,
-    links,
-    workspaceMountPaths,
-  };
-}
-
-function sandboxDataMount(
-  options: OpenShellSandboxDriverOptions,
-  requirements: HarnessWorkloadRequirements,
-) {
-  const mount = options.kubernetes.sandboxDataMount;
-  if (mount === undefined) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell operator workspace mode requires a sandbox data mount.",
-    );
-  }
-  validateSandboxDataMount(mount);
-  const candidates = requirements.workspaceMounts.filter(
-    (candidate) =>
-      candidate.subPath === mount.subPath &&
-      (mount.claimName === undefined || candidate.claimName === mount.claimName),
-  );
-  const approvedClaimNames = Array.from(
-    new Set(candidates.map((candidate) => candidate.claimName)),
-  );
-  if (approvedClaimNames.length !== 1) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell sandboxDataMount must exactly match one approved Harness workspace mount.",
-    );
-  }
-  const claimName = approvedClaimNames[0]!;
-  const approvedMount = candidates.find((candidate) => candidate.claimName === claimName)!;
-  if (approvedMount.readOnly && !mount.readOnly) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell sandboxDataMount must not weaken an approved read-only workspace mount.",
-    );
-  }
-  if (!mount.mountPath.startsWith("/sandbox/")) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell sandboxDataMount must mount an approved PVC subpath under /sandbox.",
-    );
-  }
-  if (!requirements.workspaceMounts.some((candidate) => candidate.claimName === claimName)) {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell sandboxDataMount must reuse an approved workspace PVC.",
-    );
-  }
-  return {
-    name: workspaceVolumeName(claimName),
-    mount_path: mount.mountPath,
-    sub_path: mount.subPath,
-    read_only: mount.readOnly,
-  };
 }
 
 function validateFilesystemPolicyPath(path: string, description: string): string {
@@ -1303,89 +901,6 @@ function sandboxSpec(
   providerEnvironment: ReadonlySet<string> = new Set(),
   workspaceNodeBinding?: WorkspaceNodeBinding,
 ) {
-  const dataMount = sandboxDataMount(options, requirements);
-  const workspace = workspaceVolumeMounts(requirements, dataMount, revision.id);
-  const volumeMounts = workspace.mounts;
-  const podConfig: Record<string, unknown> = {
-    runtime_class_name: options.kubernetes.runtimeClassName,
-  };
-  const driverConfig = {
-    pod: podConfig,
-    containers: {
-      agent: {
-        resources: {
-          ...(options.kubernetes.agentResources ?? {}),
-          requests: {
-            ...configurationObject(
-              options.kubernetes.agentResources?.requests ?? {},
-              "OpenShell Agent resource requests",
-            ),
-            "ephemeral-storage": "256Mi",
-          },
-          limits: {
-            ...configurationObject(
-              options.kubernetes.agentResources?.limits ?? {},
-              "OpenShell Agent resource limits",
-            ),
-            "ephemeral-storage": "1Gi",
-          },
-        },
-        volume_mounts: volumeMounts,
-      },
-    },
-    volumes: workspace.volumes,
-  };
-  return {
-    log_level: options.logLevel ?? "info",
-    environment: environment(
-      requirements,
-      providerEnvironment,
-      dataMount.mount_path,
-      workspace.workspaceMountPaths,
-    ),
-    template: {
-      image: requirements.image,
-      runtime_class_name: options.kubernetes.runtimeClassName,
-      labels: { ...requirements.labels },
-      driver_config: { fields: toProtobufStruct({ kubernetes: driverConfig }) },
-      ...(options.kubernetes.userNamespaces === undefined
-        ? {}
-        : { user_namespaces: options.kubernetes.userNamespaces }),
-    },
-    policy: {
-      version: 1,
-      filesystem: filesystemPolicy(options, dataMount, volumeMounts),
-      landlock: { compatibility: "hard_requirement" },
-      process: {
-        run_as_user: options.policy.process.runAsUser,
-        run_as_group: options.policy.process.runAsGroup,
-      },
-      network_policies: {
-        ...networkPolicies(options),
-        ...(runtimeProvider === undefined || workspaceNodeBinding === undefined
-          ? {}
-          : workspaceNodeNetworkPolicy(workspaceNodeBinding)),
-      },
-    },
-    providers: sandboxProviders(options, requirements, runtimeProvider),
-    command: sandboxCommand(requirements.command, workspace.links),
-  };
-}
-
-/**
- * Managed-mode Sandbox spec. The gateway owns the sandbox Pod's infrastructure: its
- * default RuntimeClass, the sandbox ServiceAccount, user-namespace support, and the
- * workspace volume backing /sandbox. OCC sends only the workload: image, command,
- * environment, resources, containment policy, and providers. No driver-config mount
- * may appear under /sandbox, or the gateway would drop its workspace persistence.
- */
-function managedSandboxSpec(
-  options: OpenShellSandboxDriverOptions,
-  requirements: HarnessWorkloadRequirements,
-  runtimeProvider?: string,
-  providerEnvironment: ReadonlySet<string> = new Set(),
-  workspaceNodeBinding?: WorkspaceNodeBinding,
-) {
   return {
     log_level: options.logLevel ?? "info",
     environment: environment(requirements, providerEnvironment),
@@ -1412,11 +927,6 @@ function managedSandboxSpec(
   };
 }
 
-/**
- * Managed-mode filesystem policy: the gateway's workspace volume backs /sandbox, so
- * the whole tree — including OCC's conventional runtime root beneath it — is writable
- * workspace state rather than an OCC-approved mount.
- */
 function managedFilesystemPolicy(options: OpenShellSandboxDriverOptions) {
   const configured = options.policy.filesystem;
   const readOnly = new Set(
@@ -1446,8 +956,6 @@ function managedFilesystemPolicy(options: OpenShellSandboxDriverOptions) {
 
 function validateOptions(options: OpenShellSandboxDriverOptions): void {
   configurationObject(options, "OpenShell configuration");
-  configurationObject(options.gateway, "OpenShell gateway configuration");
-  configurationObject(options.kubernetes, "OpenShell Kubernetes configuration");
   configurationObject(options.policy, "OpenShell policy configuration");
   configurationObject(options.policy.process, "OpenShell process policy");
   if (
@@ -1459,100 +967,6 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
     throw new OpenShellSandboxConfigurationFailure(
       `OpenShell startupDelayMs must be a positive safe integer no greater than ${MAX_SANDBOX_STARTUP_DELAY_MS}.`,
     );
-  }
-  if (options.gateway.workspaceMode !== "managed" && options.gateway.workspaceMode !== "operator") {
-    throw new OpenShellSandboxConfigurationFailure(
-      "OpenShell gateway workspaceMode must be managed or operator.",
-    );
-  }
-  if (options.gateway.workspaceMode === "managed") {
-    // The gateway owns every sandbox-side Kubernetes object in managed mode, so OCC
-    // cannot apply or observe namespace resources; accepting them would misstate the
-    // boundary.
-    for (const key of [
-      "operatorNamespaceLabels",
-      "readiness",
-      "operatorWorkspaceResources",
-      "networkPolicyResources",
-    ] as const) {
-      if (options.gateway[key] !== undefined) {
-        throw new OpenShellSandboxConfigurationFailure(
-          `OpenShell gateway option ${key} applies to operator workspace mode; in managed mode the gateway owns the workspace resources.`,
-        );
-      }
-    }
-  }
-  for (const key of Object.keys(options.gateway)) {
-    if (
-      ![
-        "workspaceMode",
-        "operatorNamespaceLabels",
-        "readiness",
-        "operatorWorkspaceResources",
-        "networkPolicyResources",
-      ].includes(key)
-    ) {
-      throw new OpenShellSandboxConfigurationFailure(
-        `OpenShell gateway option ${key} belongs to the openshell Backend or is unsupported.`,
-      );
-    }
-  }
-  if (options.gateway.operatorNamespaceLabels !== undefined) {
-    labels(options.gateway.operatorNamespaceLabels, "OpenShell operator Namespace labels");
-    if (Object.keys(options.gateway.operatorNamespaceLabels).length === 0) {
-      throw new OpenShellSandboxConfigurationFailure(
-        "OpenShell operator Namespace labels must not be empty.",
-      );
-    }
-  }
-  if (options.gateway.readiness !== undefined) {
-    nonempty(options.gateway.readiness.serviceName, "OpenShell gateway Service name");
-    labels(options.gateway.readiness.podSelector, "OpenShell gateway Pod selector");
-    for (const [value, description] of [
-      [options.gateway.readiness.timeoutMs, "OpenShell gateway readiness timeout"],
-      [options.gateway.readiness.pollIntervalMs, "OpenShell gateway readiness poll interval"],
-    ] as const) {
-      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
-        throw new OpenShellSandboxConfigurationFailure(
-          `${description} must be a positive safe integer.`,
-        );
-      }
-    }
-  }
-  options.gateway.networkPolicyResources?.forEach((resource, index) =>
-    validateKubernetesResource(resource, `gateway.networkPolicyResources[${index}]`),
-  );
-  options.gateway.operatorWorkspaceResources?.forEach((resource, index) =>
-    validateOperatorWorkspaceResource(resource, `gateway.operatorWorkspaceResources[${index}]`),
-  );
-  if (options.gateway.workspaceMode === "managed") {
-    // The gateway owns the sandbox Pod's infrastructure in managed mode: its default
-    // RuntimeClass, the sandbox ServiceAccount, user-namespace support, and the
-    // workspace volume behind /sandbox. Accepting an OCC choice for any of them would
-    // misstate who owns the sandbox cluster.
-    const kubernetesOptions = options.kubernetes as Readonly<Record<string, unknown>>;
-    for (const key of Object.keys(kubernetesOptions)) {
-      if (kubernetesOptions[key] !== undefined) {
-        throw new OpenShellSandboxConfigurationFailure(
-          `OpenShell kubernetes option ${key} applies to operator workspace mode; in managed mode the gateway owns the sandbox Pod infrastructure.`,
-        );
-      }
-    }
-  } else {
-    nonempty(options.kubernetes.runtimeClassName, "OpenShell RuntimeClass name");
-    if (options.kubernetes.serviceAccount?.mode !== "gatewayConfigured") {
-      throw new OpenShellSandboxConfigurationFailure(
-        "OpenShell serviceAccount mode must be gatewayConfigured.",
-      );
-    }
-    const mount = options.kubernetes.sandboxDataMount;
-    configurationObject(mount, "OpenShell sandbox data mount");
-    if (mount === undefined) {
-      throw new OpenShellSandboxConfigurationFailure(
-        "OpenShell operator workspace mode requires a sandbox data mount.",
-      );
-    }
-    validateSandboxDataMount(mount);
   }
   if (
     options.policy.landlockCompatibility !== undefined &&
@@ -1597,11 +1011,9 @@ function validateOptions(options: OpenShellSandboxDriverOptions): void {
 
 export const configurationSchema = Object.freeze({
   type: "object",
-  required: ["gateway", "kubernetes", "policy"],
+  required: ["policy"],
   additionalProperties: false,
   properties: {
-    gateway: { type: "object" },
-    kubernetes: { type: "object" },
     policy: { type: "object" },
     sandboxNamePrefix: { type: "string" },
     startupDelayMs: { type: "integer", minimum: 1, maximum: MAX_SANDBOX_STARTUP_DELAY_MS },
@@ -1884,16 +1296,14 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     this.options = options;
     this.backend = selection.backend;
-    if (options.gateway.workspaceMode === "managed") {
-      this.harnessReady = (context) => this.managedHarnessReady(context);
-    }
+    this.harnessReady = (context) => this.gatewayHarnessReady(context);
   }
 
   /**
    * The gateway reports the Sandbox phase; READY plus the exact Codex service
-   * exposure is the managed-mode readiness proof, replacing Pod observation.
+   * exposure is the readiness proof.
    */
-  private async managedHarnessReady(context: SandboxHarnessContext): Promise<boolean> {
+  private async gatewayHarnessReady(context: SandboxHarnessContext): Promise<boolean> {
     const sandbox = this.sandboxRef(context);
     const client = this.gatewayClientForNamespace(sandbox.namespaceName);
     const existing = await client.getSandbox(
@@ -1974,17 +1384,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   async ensureNamespace(context: SandboxNamespaceContext): Promise<void> {
+    // Reconcile the Workspace over RPC: the gateway owns the namespace behind it.
     const namespace = namespaceName(context.namespace);
-    if (this.options.gateway.workspaceMode === "operator") {
-      await applyOperatorNamespaceLabels(context, this.options.gateway.operatorNamespaceLabels);
-      await applyResources(context, this.options.gateway.operatorWorkspaceResources);
-      await applyResources(context, this.options.gateway.networkPolicyResources);
-      if (this.options.gateway.readiness !== undefined) {
-        await waitForGatewayReadiness(context, this.options.gateway.readiness);
-      }
-    }
-    // Managed mode reconciles the Workspace over RPC only: the gateway creates and
-    // owns the namespace behind it, so OCC performs no Kubernetes mutation here.
     const client = this.gatewayClientForNamespace(namespace);
     await client.health(context.signal);
     const name = workspaceName(context.namespace);
@@ -2081,35 +1482,24 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     };
     const selector = { name: sandbox.resourceName, workspace };
     const requestIds = createRequestIds(context.revision.id);
-    const managed = this.options.gateway.workspaceMode === "managed";
     const create = {
       ...selector,
-      labels: managed ? {} : context.requirements.labels,
-      annotations: managed ? {} : annotations,
-      spec: managed
-        ? managedSandboxSpec(
-            this.options,
-            context.requirements,
-            runtimeProvider,
-            new Set([
-              WORKSPACE_NODE_SETUP_ENVIRONMENT,
-              WORKSPACE_NODE_CA_ENVIRONMENT,
-              ...Object.keys(runtimeCredentialMaterial.credentials),
-            ]),
-            runtimeCredentialMaterial.binding,
-          )
-        : sandboxSpec(
-            this.options,
-            context.revision,
-            context.requirements,
-            runtimeProvider,
-            new Set([
-              WORKSPACE_NODE_SETUP_ENVIRONMENT,
-              WORKSPACE_NODE_CA_ENVIRONMENT,
-              ...Object.keys(runtimeCredentialMaterial.credentials),
-            ]),
-            runtimeCredentialMaterial.binding,
-          ),
+      // The gateway owns sandbox Pod infrastructure; OCC sends only the workload
+      // and its containment policy.
+      labels: {},
+      annotations: {},
+      spec: sandboxSpec(
+        this.options,
+        context.revision,
+        context.requirements,
+        runtimeProvider,
+        new Set([
+          WORKSPACE_NODE_SETUP_ENVIRONMENT,
+          WORKSPACE_NODE_CA_ENVIRONMENT,
+          ...Object.keys(runtimeCredentialMaterial.credentials),
+        ]),
+        runtimeCredentialMaterial.binding,
+      ),
       serviceExposures,
     };
     // Every reconcile pass reaches here. Re-sending CreateSandbox for a Sandbox that
@@ -2295,24 +1685,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       }
       await this.deleteRuntimeProfileIfUnused(client, workspace.name, context.signal);
       await client.deleteWorkspace(workspace.name, context.signal);
-    }
-    if (this.options.gateway.workspaceMode === "managed") {
-      // Managed mode has no OCC-applied namespace resources; the gateway deletes the
-      // namespace it created behind the Workspace.
-      return;
-    }
-    const resources = [
-      ...(this.options.gateway.operatorWorkspaceResources ?? []),
-      ...(this.options.gateway.networkPolicyResources ?? []),
-    ];
-    for (const resource of resources.reverse()) {
-      try {
-        await kubernetes(context).delete(resourceReference(resource, namespace));
-      } catch (error) {
-        if (!missingResource(error)) {
-          throw error;
-        }
-      }
     }
   }
 
