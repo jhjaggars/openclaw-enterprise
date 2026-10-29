@@ -17,7 +17,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { PROTECTED_EGRESS_CREDENTIAL_MARKER } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
@@ -85,10 +84,6 @@ export function createCodexStartup(
     lateWakeMs = 0,
     // Extra wrapper environment, such as the CA settings the workspace node supervisor passes.
     environment = {},
-    // A custom model endpoint with protected-egress credentials: the supervisor
-    // carries the configured endpoint and the nonsecret marker the boundary
-    // substitutes for the real credential.
-    customModelEndpoint = false,
   },
 ) {
   const directory = mkdtempSync(join(tmpdir(), "openclaw-plugin-ready-"));
@@ -174,12 +169,7 @@ export function createCodexStartup(
         ...(providerPat ? { OCE_CODEX_CREDENTIAL_SOURCE: "1" } : {}),
         ...(loginMode === "codex_pat"
           ? { CODEX_ACCESS_TOKEN: providerPat ? providerPlaceholder : "at-fixture-token" }
-          : {
-              OPENAI_API_KEY: customModelEndpoint
-                ? PROTECTED_EGRESS_CREDENTIAL_MARKER
-                : "fixture-api-key",
-            }),
-        ...(customModelEndpoint ? { OPENAI_BASE_URL: "https://models.example.test/v1" } : {}),
+          : { OPENAI_API_KEY: "fixture-api-key" }),
         OPENCLAW_HARNESS_MODEL: "codex/gpt-4.1",
         OPENCLAW_AGENT_REVISION_ID: revisionId,
         ...(protectedInference
@@ -290,11 +280,7 @@ export function createCodexStartup(
                 } else {
                   assert.equal(
                     options.input,
-                    loginMode === "codex_pat"
-                      ? "at-fixture-token"
-                      : customModelEndpoint
-                        ? PROTECTED_EGRESS_CREDENTIAL_MARKER
-                        : "fixture-api-key",
+                    loginMode === "codex_pat" ? "at-fixture-token" : "fixture-api-key",
                   );
                 }
                 assert.ok(options.timeout > 0 && options.timeout <= 30000);
@@ -324,28 +310,7 @@ export function createCodexStartup(
                   "stale readiness must be removed before probing",
                 );
                 // Probe isolation and wrapper credential clearing are separate boundaries.
-                // With a custom model endpoint, only the protected-egress marker may
-                // reach the probe, and the dedicated provider must be selected.
-                if (customModelEndpoint) {
-                  assert.equal(childEnvironment.OPENAI_API_KEY, PROTECTED_EGRESS_CREDENTIAL_MARKER);
-                  for (const argument of [
-                    'model_providers.openclaw_model.base_url="https://models.example.test/v1"',
-                    'model_providers.openclaw_model.wire_api="responses"',
-                    'model_providers.openclaw_model.env_key="OPENAI_API_KEY"',
-                    "model_providers.openclaw_model.supports_websockets=false",
-                    'model_provider="openclaw_model"',
-                  ]) {
-                    assert.ok(args.includes(argument), argument);
-                  }
-                } else {
-                  absent(childEnvironment, modelCredentials);
-                  // Without the custom endpoint's protected marker, the dedicated
-                  // provider must not be selected either.
-                  assert.equal(
-                    args.some((argument) => argument.includes("openclaw_model")),
-                    false,
-                  );
-                }
+                absent(childEnvironment, modelCredentials);
                 absent(sandbox.process.env, modelCredentials);
                 if (providerPat) {
                   assert.equal(childEnvironment.CODEX_HOME, codexHome);

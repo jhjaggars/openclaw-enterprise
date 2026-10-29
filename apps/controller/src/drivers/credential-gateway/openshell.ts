@@ -63,14 +63,6 @@ export interface OpenShellCredentialGatewayOptions {
    * Without it the catalog omits `bearer-token`.
    */
   readonly toolBinaries?: readonly string[];
-  /**
-   * The inference endpoint the OpenAI API-key credential may authenticate to, as
-   * an exact DNS host. Defaults to api.openai.com; a private model gateway
-   * replaces the `openai` provider profile's endpoint binding and the endpoint
-   * the credential check admits. Other source types keep their recorded
-   * destinations.
-   */
-  readonly modelEndpoint?: { readonly host: string; readonly port: number };
 }
 
 export interface OpenShellCredentialGatewaySelection {
@@ -680,7 +672,7 @@ function validateOptions(options: OpenShellCredentialGatewayOptions): void {
     );
   }
   for (const key of Object.keys(record)) {
-    if (key !== "binaries" && key !== "toolBinaries" && key !== "modelEndpoint") {
+    if (key !== "binaries" && key !== "toolBinaries") {
       throw new OpenShellCredentialGatewayFailure(
         `OpenShell Credential Gateway configuration contains unsupported option ${key}.`,
       );
@@ -703,22 +695,6 @@ function validateOptions(options: OpenShellCredentialGatewayOptions): void {
   ) {
     throw new OpenShellCredentialGatewayFailure(
       "OpenShell Credential Gateway toolBinaries must be a nonempty list of absolute paths.",
-    );
-  }
-  if (options.modelEndpoint !== undefined && !exactDnsName(options.modelEndpoint.host)) {
-    throw new OpenShellCredentialGatewayFailure(
-      "OpenShell Credential Gateway modelEndpoint host must be an exact DNS name; wildcards, IP addresses, and other shapes are unsupported.",
-    );
-  }
-  if (
-    options.modelEndpoint !== undefined &&
-    (!isNonEmptyString(options.modelEndpoint.host) ||
-      !Number.isSafeInteger(options.modelEndpoint.port) ||
-      options.modelEndpoint.port < 1 ||
-      options.modelEndpoint.port > 65535)
-  ) {
-    throw new OpenShellCredentialGatewayFailure(
-      "OpenShell Credential Gateway modelEndpoint must have a nonempty host and port from 1 through 65535.",
     );
   }
 }
@@ -837,21 +813,6 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
     properties: {
       binaries: { type: "array", items: { type: "string" }, minItems: 1 },
       toolBinaries: { type: "array", items: { type: "string", pattern: "^/" }, minItems: 1 },
-      modelEndpoint: {
-        type: "object",
-        required: ["host", "port"],
-        additionalProperties: false,
-        properties: {
-          host: {
-            type: "string",
-            minLength: 1,
-            maxLength: 253,
-            pattern:
-              "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$",
-          },
-          port: { type: "integer", minimum: 1, maximum: 65535 },
-        },
-      },
     },
   });
 
@@ -905,14 +866,6 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
       ...(options.toolBinaries === undefined
         ? {}
         : { toolBinaries: Object.freeze([...options.toolBinaries]) }),
-      ...(options.modelEndpoint === undefined
-        ? {}
-        : {
-            modelEndpoint: Object.freeze({
-              host: options.modelEndpoint.host,
-              port: options.modelEndpoint.port,
-            }),
-          }),
     });
     this.backend = selection.backend;
     this.refresh = selection.backend.drivers.credential_refresh !== undefined;
@@ -1355,22 +1308,7 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
     gateway: OpenShellGatewayPlacement | undefined,
     signal: AbortSignal,
   ): Promise<void> {
-    const profileBase = type.profile(sourceId, config, this.options, gateway);
-    // Only the OpenAI API-key profile's destination follows the configured model
-    // endpoint. OAuth and PAT profiles keep the destinations their sources record:
-    // those credentials must not authenticate to a private model gateway.
-    const endpoint = type.catalog.type === "openai" ? this.options.modelEndpoint : undefined;
-    const base =
-      endpoint === undefined
-        ? profileBase
-        : {
-            ...profileBase,
-            endpoints: profileBase.endpoints.map((entry) =>
-              entry.host === "api.openai.com" && entry.port === 443
-                ? { ...entry, host: endpoint.host, port: endpoint.port }
-                : entry,
-            ),
-          };
+    const base = type.profile(sourceId, config, this.options, gateway);
     const digest = sha256Hex(JSON.stringify(base));
     const profile: OpenShellProviderProfile = {
       ...base,

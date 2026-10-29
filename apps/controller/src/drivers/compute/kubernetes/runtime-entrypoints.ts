@@ -21,12 +21,6 @@ import {
 // and 5s supervisor margin. Idle Gateways exit as soon as their work settles.
 export const GATEWAY_STOP_TIMEOUT_MS = 330_000;
 
-// The nonsecret credential value prepareHarnessAuth writes for protected egress:
-// ordinary model clients send it as their credential and the egress boundary
-// replaces it with the real credential on the wire. The startup probe forwards
-// it — and only it — so a real API key never reaches the probe's environment.
-export const PROTECTED_EGRESS_CREDENTIAL_MARKER = "oce-protected-egress";
-
 // Every runtime wrapper runs under tini. As PID 1, Node ignores SIGTERM until
 // a wrapper installs its handler, and cannot run one inside a blocking model
 // probe, so a Pod stop waited for SIGKILL. Under tini the wrapper exits on
@@ -417,40 +411,7 @@ function writeCodexConfigToml(runtime) {
   }
   const target = safeRuntimePath(process.env.CODEX_HOME, "config.toml");
   pluginMkdirSync(pluginDirname(target), { recursive: true });
-  // A custom model endpoint configured for the harness reaches Codex the same
-  // way the runtime projects it for its own Codex spawns: as a provider entry
-  // selected at the TOML root. A dedicated provider (rather than the built-in
-  // openai base URL override) also selects the plain HTTP transport — the
-  // built-in provider always prefers WebSocket, which a relay-fronted endpoint
-  // may not serve — and the credential still flows from CODEX_HOME auth.json
-  // through the boundary. A config that already selects a model provider keeps
-  // it: the admitted source endpoint stays the single endpoint authority.
-  var customBaseUrl = process.env.OPENAI_BASE_URL;
-  var content = runtime.codexConfigurationToml;
-  if (typeof customBaseUrl === "string" && customBaseUrl.length > 0 &&
-      !/^model_provider\s*=/.test(content)) {
-    // TOML places root keys before every table header, so the selector is
-    // inserted before the first header and the provider table is appended.
-    var headerIndex = content.startsWith("[") ? 0 : content.indexOf("\n[");
-    var selector = "model_provider = \"openclaw_model\"\n";
-    content = headerIndex < 0
-      ? content + "\n" + selector
-      : content.slice(0, headerIndex === 0 ? 0 : headerIndex + 1) + selector +
-        content.slice(headerIndex === 0 ? 0 : headerIndex + 1);
-    content = content
-      + "\n[model_providers.openclaw_model]\n"
-      + "name = \"openclaw model endpoint\"\n"
-      + "base_url = " + JSON.stringify(customBaseUrl) + "\n"
-      + "wire_api = \"responses\"\n"
-      // The app server's Codex spawns carry no credential environment (the
-      // wrapper deletes it after login), so the provider must take its
-      // authorization from Codex's stored OpenAI auth, exactly as the rendered
-      // source-endpoint provider does; without this flag those spawns send no
-      // Authorization header to the custom endpoint.
-      + "requires_openai_auth = true\n"
-      + "supports_websockets = false\n";
-  }
-  pluginWriteFileSync(target, content, { mode: 0o600 });
+  pluginWriteFileSync(target, runtime.codexConfigurationToml, { mode: 0o600 });
 }
 
 function pluginRuntimeReady() {
@@ -3927,15 +3888,6 @@ if (login.status !== 0 || login.error) {
       ? "AUTHENTICATION_FAILED" : "LOGIN_FAILED",
   );
 } else {
-// The custom model provider reads its credential from the environment the
-// supervisor provisioned. Only protected egress supplies that credential, as
-// this nonsecret marker rather than a real key: API-key login keeps the real
-// key out of the probe's environment, and the network boundary substitutes
-// the real credential for the marker on the wire.
-const customModelEndpoint =
-  typeof process.env.OPENAI_BASE_URL === "string" && process.env.OPENAI_BASE_URL.length > 0 &&
-  process.env.OPENAI_API_KEY === "${PROTECTED_EGRESS_CREDENTIAL_MARKER}";
-const modelCredentialReference = customModelEndpoint ? process.env.OPENAI_API_KEY : undefined;
 delete process.env.CODEX_ACCESS_TOKEN;
 delete process.env.OPENAI_API_KEY;
 delete process.env.OCE_CODEX_CHATGPT_ACCOUNT;
@@ -4033,20 +3985,6 @@ ${disableUnboundedConnectionRetries ? '      "--disable", "unbounded_connection_
       "--skip-git-repo-check", "--json", "--sandbox", "read-only", "--cd", directory,
       "--model", selectedModel.slice(selectedModel.indexOf("/") + 1),
       "-c", "cli_auth_credentials_store=file",
-      // A custom model endpoint selects a dedicated provider so Codex uses the
-      // plain HTTP transport (the built-in openai provider always prefers
-      // WebSocket, which a relay-fronted endpoint may not serve) and reads its
-      // credential from the environment the supervisor provisioned.
-      ...(customModelEndpoint
-        ? [
-            "-c", "model_providers.openclaw_model.name=\"openclaw model endpoint\"",
-            "-c", "model_providers.openclaw_model.base_url=" + JSON.stringify(process.env.OPENAI_BASE_URL),
-            "-c", "model_providers.openclaw_model.wire_api=\"responses\"",
-            "-c", "model_providers.openclaw_model.supports_websockets=false",
-            "-c", "model_providers.openclaw_model.env_key=\"OPENAI_API_KEY\"",
-            "-c", "model_provider=\"openclaw_model\"",
-          ]
-        : []),
       "-c", 'web_search="disabled"',
       "-c", "project_doc_max_bytes=0",
       "-c", "check_for_update_on_startup=false",
@@ -4073,12 +4011,6 @@ ${disableUnboundedConnectionRetries ? '      "--disable", "unbounded_connection_
         HOME: directory,
         CODEX_HOME: process.env.CODEX_HOME,
         RUST_LOG: "error",
-        // The custom model provider reads its credential from this environment
-        // variable; the value is the supervisor's nonsecret egress marker, and
-        // the network boundary substitutes the real credential on the wire.
-        ...(modelCredentialReference !== undefined
-          ? { OPENAI_API_KEY: modelCredentialReference }
-          : {}),
         ...Object.fromEntries(
           ["SSL_CERT_FILE", "SSL_CERT_DIR"]
             .filter((name) => typeof process.env[name] === "string" && process.env[name].length > 0)

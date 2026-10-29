@@ -9086,42 +9086,6 @@ test("credential-source authentication renders no model Secret and requires the 
     { name: "CODEX_LOGIN_MODE", value: "api_key" },
   );
 
-  const customEndpointRevision = {
-    ...revision,
-    configuration: {
-      ...revision.configuration,
-      models: { providers: { codex: { baseUrl: "https://models.example.test/v1" } } },
-    },
-  };
-  const customEndpointPrepared = driver.harnessAuthForRevision(
-    customEndpointRevision,
-    { harnessAuth: { ...snapshot, source } },
-    namespace,
-  );
-  assert.deepEqual(
-    customEndpointPrepared.environment.find(({ name }) => name === "OPENAI_BASE_URL"),
-    { name: "OPENAI_BASE_URL", value: "https://models.example.test/v1" },
-  );
-
-  // The fail-closed development placeholder must not become a real endpoint: Codex
-  // keeps its own default, so the harness environment stays unchanged.
-  const placeholderRevision = {
-    ...revision,
-    configuration: {
-      ...revision.configuration,
-      models: { providers: { codex: { baseUrl: "http://127.0.0.1:9/v1" } } },
-    },
-  };
-  const placeholderPrepared = driver.harnessAuthForRevision(
-    placeholderRevision,
-    { harnessAuth: { ...snapshot, source } },
-    namespace,
-  );
-  assert.equal(
-    placeholderPrepared.environment.some(({ name }) => name === "OPENAI_BASE_URL"),
-    false,
-  );
-
   const nativeRevision = {
     ...revision,
     harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" },
