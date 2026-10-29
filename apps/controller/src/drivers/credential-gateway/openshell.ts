@@ -64,9 +64,11 @@ export interface OpenShellCredentialGatewayOptions {
    */
   readonly toolBinaries?: readonly string[];
   /**
-   * The inference endpoint the OpenAI credential may authenticate to. Defaults
-   * to api.openai.com; a private model gateway replaces both the provider
-   * profile's endpoint binding and the endpoint the credential check admits.
+   * The inference endpoint the OpenAI API-key credential may authenticate to, as
+   * an exact DNS host. Defaults to api.openai.com; a private model gateway
+   * replaces the `openai` provider profile's endpoint binding and the endpoint
+   * the credential check admits. Other source types keep their recorded
+   * destinations.
    */
   readonly modelEndpoint?: { readonly host: string; readonly port: number };
 }
@@ -703,6 +705,11 @@ function validateOptions(options: OpenShellCredentialGatewayOptions): void {
       "OpenShell Credential Gateway toolBinaries must be a nonempty list of absolute paths.",
     );
   }
+  if (options.modelEndpoint !== undefined && !exactDnsName(options.modelEndpoint.host)) {
+    throw new OpenShellCredentialGatewayFailure(
+      "OpenShell Credential Gateway modelEndpoint host must be an exact DNS name; wildcards, IP addresses, and other shapes are unsupported.",
+    );
+  }
   if (
     options.modelEndpoint !== undefined &&
     (!isNonEmptyString(options.modelEndpoint.host) ||
@@ -835,7 +842,13 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
         required: ["host", "port"],
         additionalProperties: false,
         properties: {
-          host: { type: "string", minLength: 1 },
+          host: {
+            type: "string",
+            minLength: 1,
+            maxLength: 253,
+            pattern:
+              "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$",
+          },
           port: { type: "integer", minimum: 1, maximum: 65535 },
         },
       },
@@ -1343,7 +1356,10 @@ export class OpenShellCredentialGatewayDriver implements CredentialGatewayDriver
     signal: AbortSignal,
   ): Promise<void> {
     const profileBase = type.profile(sourceId, config, this.options, gateway);
-    const endpoint = this.options.modelEndpoint;
+    // Only the OpenAI API-key profile's destination follows the configured model
+    // endpoint. OAuth and PAT profiles keep the destinations their sources record:
+    // those credentials must not authenticate to a private model gateway.
+    const endpoint = type.catalog.type === "openai" ? this.options.modelEndpoint : undefined;
     const base =
       endpoint === undefined
         ? profileBase

@@ -23,6 +23,7 @@ import {
   openShellWorkspaceName,
 } from "../../apps/controller/src/backends/openshell.ts";
 import { TransientDependencyError } from "../../packages/occ/src/index.ts";
+import { ConfigurationValidationError } from "../../packages/contracts/src/configuration-definition.ts";
 import { DependencyUnavailableError } from "../../packages/occ/src/errors.ts";
 import { createManagedWorkloadExec } from "../helpers/egress-managed-workload-exec.mjs";
 import { createCustodyTransitions } from "../helpers/egress-supplier-custody-transitions.mjs";
@@ -2971,4 +2972,93 @@ test("installed workload clients select the enrolled Sandbox at authenticated Ex
   selectedId = "replaced-id";
   await assert.rejects(curl(), /supplier Sandbox replaced/);
   assert.equal(launches.length, 3, "an old enrolled recipient never silently switches Sandbox");
+});
+
+// A configured model endpoint moves only the OpenAI API-key profile's destination.
+// OAuth and PAT profiles keep the destinations their sources record, so those
+// credentials never authenticate to a private model gateway, and the host is held
+// to the same exact-DNS rule as a source endpoint.
+test("OpenShell modelEndpoint rewrites only the OpenAI profile to an exact DNS host", async () => {
+  const profiles = new Map();
+  const providers = new Map();
+  const client = {
+    async getProviderProfile(_workspace, id) {
+      return profiles.get(id);
+    },
+    async importProviderProfile(_workspace, profile) {
+      profiles.set(profile.id, profile);
+    },
+    async updateProviderProfile(_workspace, profile) {
+      profiles.set(profile.id, profile);
+    },
+    async getProvider(_workspace, name) {
+      return providers.get(name);
+    },
+    async createProvider(input) {
+      providers.set(input.name, { ...input, resourceVersion: "1" });
+    },
+  };
+  const backend = {
+    drivers: {
+      credential_gateway: "credential-gateway-openshell",
+      credential_refresh: "credential-refresh-openshell",
+    },
+    client: { clientForNamespace: () => client, placement: () => undefined },
+  };
+  const namespace = { id: "ns-model-endpoint", name: "tenant-workspace" };
+  const signal = AbortSignal.timeout(2_000);
+  const register = async (gateway, id, type, config) =>
+    gateway.registerSource(
+      {
+        namespace,
+        signal,
+        source: { id, type, namespaceId: namespace.id, driverId: gateway.id, config },
+      },
+      { type, config, secrets: type === "openai" ? { api_key: "fixture-key" } : {} },
+    );
+
+  // The host follows the source endpoint's exact-DNS rule: the admission schema
+  // refuses wildcards, spaces and paths, and the Driver's own constraints refuse
+  // IP literals and numeric-last-label hosts the URL parser reads as IPv4.
+  for (const host of ["10.0.0.5", "*.example.test", "models.example.test/v1", " ", "example.123"]) {
+    assert.throws(
+      () =>
+        new OpenShellCredentialGatewayDriver(
+          { binaries: ["/usr/local/bin/codex"], modelEndpoint: { host, port: 8443 } },
+          { backend },
+        ),
+      ConfigurationValidationError,
+      host,
+    );
+  }
+
+  const gateway = new OpenShellCredentialGatewayDriver(
+    {
+      binaries: ["/usr/local/bin/codex"],
+      modelEndpoint: { host: "models.example.test", port: 8443 },
+    },
+    { backend },
+  );
+  await register(gateway, "cs_openai_custom", "openai", {});
+  const openaiProfile = profiles.get(openShellProviderName("cs_openai_custom"));
+  assert.deepEqual(
+    openaiProfile.endpoints.map(({ host, port }) => `${host}:${port}`),
+    ["models.example.test:8443"],
+  );
+
+  // A codex-oauth source keeps its recorded api.openai.com destination: its
+  // ChatGPT account credential must not authenticate to the private gateway.
+  const oauth = new OpenShellCredentialGatewayDriver(
+    {
+      binaries: ["/usr/local/bin/codex"],
+      modelEndpoint: { host: "models.example.test", port: 8443 },
+    },
+    { backend },
+  );
+  await register(oauth, "cs_oauth_custom", "codex-oauth", {});
+  const oauthProfile = profiles.get(openShellProviderName("cs_oauth_custom"));
+  assert.deepEqual(
+    oauthProfile.endpoints.map(({ host, port }) => `${host}:${port}`),
+    ["chatgpt.com:443", "api.openai.com:443"],
+  );
 });
