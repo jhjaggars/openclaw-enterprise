@@ -388,9 +388,9 @@ test("Kubernetes dev-up keeps the failed stack for inspection when KEEP_ON_FAILU
   assert.doesNotMatch(result.stderr, /rollback incomplete; preserving/);
   const directory = fixture.env.OCC_DEVELOPMENT_STATE_DIRECTORY;
   await assert.ok((await stat(directory)).isDirectory());
-  if (existsSync(keyOutput)) {
-    assert.equal((await stat(keyOutput)).mode & 0o777, 0o600);
-  }
+  // The authorization failure happens before the service key is copied, so
+  // the kept stack holds no key material to clean up.
+  await assert.rejects(stat(keyOutput), { code: "ENOENT" });
   // The kept stack must still clean up through the recorded state.
   const cleaned = await runDevDown(fixture.env);
   assert.equal(cleaned.status, 0, cleaned.stderr);

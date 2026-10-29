@@ -69,10 +69,13 @@ graph TD
 Without a Sandbox Driver, Compose Kubernetes startup requires Node before creating resources.
 
 Engine and Compose JSON probes select Docker or Podman independently of a
-`docker` alias. Podman requires `yq` v4 and a Compose provider: `docker-compose`
-is preferred because the Compose command passes `--project-directory`, which
-standalone `podman-compose` does not support; `podman-compose` is used when
-`docker-compose` is absent. `occ dev down` resolves the same preference. Rootful
+`docker` alias. Podman requires `yq` v4 and a Compose provider. Docker Compute
+requires standalone `podman-compose`, which `scripts/dev-up` pins and `occ dev
+down` matches so the stack is stopped with the provider that started it. The
+Kubernetes-profile Compose command that `occ dev up` and `occ dev down` drive
+prefers `docker-compose` — it passes `--project-directory`, which standalone
+`podman-compose` does not support — and falls back to `podman-compose` when
+`docker-compose` is absent. Rootful
 Podman on Linux must expose its API socket (for example,
 `systemctl enable --now podman.socket`); startup resolves that socket and pins
 it as `DOCKER_HOST` for the provider. Explicit `-f FILE`, `-fFILE`, `-f=FILE`, `--file FILE`, or

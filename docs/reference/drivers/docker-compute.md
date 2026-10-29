@@ -16,7 +16,7 @@ host credentials. Docker Compute cannot be selected for production.
 
 ## Requirements
 
-- Docker Engine with Docker Compose, or Podman with `docker-compose` or `podman-compose`, and `yq` v4.
+- Docker Engine with Docker Compose, or Podman with `podman-compose` and `yq` v4.
 - The full Compose development stack, not a process-local controller.
 - Existing production-equivalent runtime images:
   `OCC_DOCKER_GATEWAY_IMAGE` and `OCC_DOCKER_AGENT_IMAGE`, or one shared
@@ -28,10 +28,8 @@ host credentials. Docker Compute cannot be selected for production.
   volume.
 
 `scripts/dev-up` is the supported Podman entry point. It auto-detects Podman
-without a `docker` alias, prefers the `docker-compose` provider — the Compose
-command passes `--project-directory`, which standalone `podman-compose` does not
-support — and falls back to `podman-compose` when `docker-compose` is absent.
-`occ dev down` resolves the same preference. It mounts
+without a `docker` alias, requires and pins the standalone `podman-compose`
+provider, and `occ dev down` stops the stack with that same provider. It mounts
 the reported API socket through `compose.podman.yaml`, and preserves the
 driver's existing `/var/run/docker.sock` contract inside the worker. The
 Docker Compute worker disables SELinux process labeling because relabeling the

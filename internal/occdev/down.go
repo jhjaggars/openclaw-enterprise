@@ -24,7 +24,10 @@ func Down(ctx context.Context, opts Options) error {
 		if sandbox != "none" {
 			return fmt.Errorf("OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell requires OCC_DEVELOPMENT_COMPUTE_DRIVER=kubernetes")
 		}
-		if err := r.selectEngine(ctx, r.setting("OCC_DEVELOPMENT_CONTAINER_ENGINE", "auto")); err != nil {
+		// Docker Compute stacks are started by scripts/dev-up with standalone
+		// podman-compose; stop them with the same provider or compose down
+		// removes nothing.
+		if err := r.selectDockerComputeEngine(ctx, r.setting("OCC_DEVELOPMENT_CONTAINER_ENGINE", "auto")); err != nil {
 			return err
 		}
 		args := append([]string{"compose"}, opts.ComposeArgs...)

@@ -86,15 +86,27 @@ func (r *runner) compose(ctx context.Context, state *developmentState, args ...s
 func (r *runner) composeOutput(ctx context.Context, state *developmentState, args ...string) ([]byte, error) {
 	return r.output(ctx, r.engine, append(state.composeCommand(), args...)...)
 }
+
+// selectEngine selects a container engine for the Compose commands the
+// Kubernetes profile drives through Go; its provider preference must match
+// composeProvider so occ dev up and occ dev down agree.
 func (r *runner) selectEngine(ctx context.Context, requested string) error {
-	return r.selectContainerEngine(ctx, requested, true)
+	return r.selectContainerEngine(ctx, requested, true, composeProvider)
+}
+
+// selectDockerComputeEngine selects a container engine for stopping a Docker
+// Compute stack. scripts/dev-up starts that stack with standalone
+// podman-compose, so occ dev down must pin the same provider: a different
+// provider's project labels make its compose down remove nothing.
+func (r *runner) selectDockerComputeEngine(ctx context.Context, requested string) error {
+	return r.selectContainerEngine(ctx, requested, true, podmanComposeProvider)
 }
 
 func (r *runner) selectImageEngine(ctx context.Context, requested string) error {
-	return r.selectContainerEngine(ctx, requested, false)
+	return r.selectContainerEngine(ctx, requested, false, nil)
 }
 
-func (r *runner) selectContainerEngine(ctx context.Context, requested string, requireCompose bool) error {
+func (r *runner) selectContainerEngine(ctx context.Context, requested string, requireCompose bool, provider func() (string, error)) error {
 	if requested != "auto" && requested != "docker" && requested != "podman" {
 		return fmt.Errorf("OCC_DEVELOPMENT_CONTAINER_ENGINE must be auto, docker, or podman")
 	}
@@ -135,11 +147,11 @@ func (r *runner) selectContainerEngine(ctx context.Context, requested string, re
 		}
 		if engine == "podman" {
 			if requireCompose {
-				provider, err := composeProvider()
+				found, err := provider()
 				if err != nil {
 					continue
 				}
-				r.env["PODMAN_COMPOSE_PROVIDER"] = provider
+				r.env["PODMAN_COMPOSE_PROVIDER"] = found
 			}
 		}
 		if _, err := r.output(ctx, engine, "info"); err != nil {
@@ -172,6 +184,12 @@ func composeProvider() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("Podman Compose requires docker-compose or podman-compose on PATH")
+}
+
+// podmanComposeProvider resolves the standalone podman-compose provider that
+// scripts/dev-up requires and pins for Docker Compute.
+func podmanComposeProvider() (string, error) {
+	return exec.LookPath("podman-compose")
 }
 
 func (r *runner) pinEndpoint(ctx context.Context) error {
