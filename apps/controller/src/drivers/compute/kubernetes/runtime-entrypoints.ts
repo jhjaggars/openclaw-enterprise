@@ -442,6 +442,12 @@ function writeCodexConfigToml(runtime) {
       + "name = \"openclaw model endpoint\"\n"
       + "base_url = " + JSON.stringify(customBaseUrl) + "\n"
       + "wire_api = \"responses\"\n"
+      // The app server's Codex spawns carry no credential environment (the
+      // wrapper deletes it after login), so the provider must take its
+      // authorization from Codex's stored OpenAI auth, exactly as the rendered
+      // source-endpoint provider does; without this flag those spawns send no
+      // Authorization header to the custom endpoint.
+      + "requires_openai_auth = true\n"
       + "supports_websockets = false\n";
   }
   pluginWriteFileSync(target, content, { mode: 0o600 });

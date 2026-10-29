@@ -548,6 +548,10 @@ writeCodexConfigToml(${JSON.stringify({
   assert.ok(custom.includes("[model_providers.openclaw_model]"));
   assert.ok(custom.includes('base_url = "https://models.example.test/v1"'));
   assert.ok(custom.includes("supports_websockets = false"));
+  assert.ok(
+    custom.includes("requires_openai_auth = true"),
+    "the app server's Codex spawns take their authorization from the stored auth",
+  );
   // The provider table follows the feature tables, not the reverse.
   assert.ok(custom.indexOf("[model_providers.openclaw_model]") > custom.indexOf("[features]"));
 });
