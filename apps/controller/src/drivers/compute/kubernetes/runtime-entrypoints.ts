@@ -21,6 +21,12 @@ import {
 // and 5s supervisor margin. Idle Gateways exit as soon as their work settles.
 export const GATEWAY_STOP_TIMEOUT_MS = 330_000;
 
+// The nonsecret credential value prepareHarnessAuth writes for protected egress:
+// ordinary model clients send it as their credential and the egress boundary
+// replaces it with the real credential on the wire. The startup probe forwards
+// it — and only it — so a real API key never reaches the probe's environment.
+export const PROTECTED_EGRESS_CREDENTIAL_MARKER = "oce-protected-egress";
+
 // Every runtime wrapper runs under tini. As PID 1, Node ignores SIGTERM until
 // a wrapper installs its handler, and cannot run one inside a blocking model
 // probe, so a Pod stop waited for SIGKILL. Under tini the wrapper exits on
@@ -3906,9 +3912,15 @@ if (login.status !== 0 || login.error) {
       ? "AUTHENTICATION_FAILED" : "LOGIN_FAILED",
   );
 } else {
-// The model credential stays the supervisor's resolve reference; the probe's
-// custom provider forwards it and the network boundary substitutes the value.
-const modelCredentialReference = process.env.OPENAI_API_KEY;
+// The custom model provider reads its credential from the environment the
+// supervisor provisioned. Only protected egress supplies that credential, as
+// this nonsecret marker rather than a real key: API-key login keeps the real
+// key out of the probe's environment, and the network boundary substitutes
+// the real credential for the marker on the wire.
+const customModelEndpoint =
+  typeof process.env.OPENAI_BASE_URL === "string" && process.env.OPENAI_BASE_URL.length > 0 &&
+  process.env.OPENAI_API_KEY === "${PROTECTED_EGRESS_CREDENTIAL_MARKER}";
+const modelCredentialReference = customModelEndpoint ? process.env.OPENAI_API_KEY : undefined;
 delete process.env.CODEX_ACCESS_TOKEN;
 delete process.env.OPENAI_API_KEY;
 delete process.env.OCE_CODEX_CHATGPT_ACCOUNT;
@@ -4010,7 +4022,7 @@ ${disableUnboundedConnectionRetries ? '      "--disable", "unbounded_connection_
       // plain HTTP transport (the built-in openai provider always prefers
       // WebSocket, which a relay-fronted endpoint may not serve) and reads its
       // credential from the environment the supervisor provisioned.
-      ...(typeof process.env.OPENAI_BASE_URL === "string" && process.env.OPENAI_BASE_URL.length > 0
+      ...(customModelEndpoint
         ? [
             "-c", "model_providers.openclaw_model.name=\"openclaw model endpoint\"",
             "-c", "model_providers.openclaw_model.base_url=" + JSON.stringify(process.env.OPENAI_BASE_URL),
@@ -4047,9 +4059,9 @@ ${disableUnboundedConnectionRetries ? '      "--disable", "unbounded_connection_
         CODEX_HOME: process.env.CODEX_HOME,
         RUST_LOG: "error",
         // The custom model provider reads its credential from this environment
-        // variable; the value stays the supervisor's resolve reference, and the
-        // network boundary substitutes the real credential on the wire.
-        ...(typeof modelCredentialReference === "string" && modelCredentialReference.length > 0
+        // variable; the value is the supervisor's nonsecret egress marker, and
+        // the network boundary substitutes the real credential on the wire.
+        ...(modelCredentialReference !== undefined
           ? { OPENAI_API_KEY: modelCredentialReference }
           : {}),
         ...Object.fromEntries(

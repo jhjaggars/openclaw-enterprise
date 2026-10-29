@@ -257,6 +257,7 @@ import {
   MANAGED_CONFIGURATION_DIRECTORY,
   NATIVE_HOOK_CREDENTIAL_DIRECTORY,
   NATIVE_WORKER_ENTRYPOINT,
+  PROTECTED_EGRESS_CREDENTIAL_MARKER,
   RUNTIME_READINESS_PATH,
   RUNTIME_WRAPPER_COMMAND,
   SETUP_WRAPPER_COMMAND,
@@ -1098,7 +1099,7 @@ function prepareHarnessAuth(
     if (resolvedAuth.source.egress !== undefined) {
       environment.push({
         name: harnessModelAuthentication(configuration).environmentName,
-        value: "oce-protected-egress",
+        value: PROTECTED_EGRESS_CREDENTIAL_MARKER,
       });
     }
     // The paired Sandbox supplies the credential environment; no Secret is projected here.

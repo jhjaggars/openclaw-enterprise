@@ -483,6 +483,27 @@ test("Codex runtime gates startup and readiness on a successful native authentic
   }
 });
 
+// A custom model endpoint selects the dedicated HTTP provider, and only the
+// protected-egress marker — never a real API key — reaches the probe's Codex
+// process. API-key login keeps the real key out of that environment entirely.
+test("a custom model endpoint forwards only the protected egress marker to the probe", async (t) => {
+  const started = { type: "turn.started" };
+  const assistant = { type: "item.completed", item: { type: "agent_message", text: "READY" } };
+  const completed = { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } };
+  await checkCodexStartup(t, {
+    customModelEndpoint: true,
+    events: [started, assistant, completed],
+    expect: ready,
+  });
+  // An endpoint configured without the protected-egress marker (an API-key
+  // login carries the real key) selects no provider and forwards no credential.
+  await checkCodexStartup(t, {
+    environment: { OPENAI_BASE_URL: "https://models.example.test/v1" },
+    events: [started, assistant, completed],
+    expect: ready,
+  });
+});
+
 // Finding 1576: one provider 5xx or dropped stream must not fail a deployment for good.
 // A transient failure gets the single retry a model timeout gets, inside the same 61 s
 // budget; the held cause is the last attempt's, marked as retried.
