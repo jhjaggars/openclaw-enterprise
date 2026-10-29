@@ -11,7 +11,7 @@ import type {
   PluginToolCatalogEntry,
   PluginToolPolicy,
 } from "@openclaw-enterprise/contracts";
-import { element, button, dismissOnBackdrop, setText } from "../dom.mjs";
+import { element, button, dismissOnBackdrop, mayReturnFocus, setText } from "../dom.mjs";
 
 export type CatalogDirection = "search" | "refresh" | "next" | "previous";
 export type CatalogEntry = PluginCatalogEntry & {
@@ -311,7 +311,9 @@ export function createPluginFields({
   dialog.addEventListener("close", () => {
     waitingForCatalog = false;
     onCancelDiscovery?.();
-    configure.focus();
+    if (mayReturnFocus(dialog)) {
+      configure.focus();
+    }
   });
   // A search Enter must not submit a surrounding form.
   dialog.addEventListener("keydown", (event) => {

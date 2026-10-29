@@ -83,8 +83,10 @@ function configurationValues(scenario) {
       ...(scenario.slackEnterpriseOrgInstall ? { enterpriseOrgInstall: true } : {}),
       dmPolicy: scenario.slackPolicy ?? "pairing",
       groupPolicy: scenario.slackPolicy === "open" ? "open" : "allowlist",
-      appToken: { source: "env", provider: "default", id: "SLACK_APP_TOKEN" },
-      botToken: { source: "env", provider: "default", id: "SLACK_BOT_TOKEN" },
+      ...(scenario.slackTokens ?? {
+        appToken: { source: "env", provider: "default", id: "SLACK_APP_TOKEN" },
+        botToken: { source: "env", provider: "default", id: "SLACK_BOT_TOKEN" },
+      }),
       allowFrom:
         scenario.slackAllowFrom ?? (scenario.slackPolicy === "open" ? ["*"] : ["UDEMO123"]),
       channels: slackChannels(scenario),
@@ -316,8 +318,9 @@ export function installFixture(scenario, evidence) {
     config.values.agents.defaults.model = "codex/gpt-5.1";
   }
   if (scenario.slack && scenario.slackBindings !== false) {
-    const keys =
-      scenario.slackBindings === "app"
+    const keys = Array.isArray(scenario.slackBindings)
+      ? scenario.slackBindings
+      : scenario.slackBindings === "app"
         ? ["SLACK_APP_TOKEN"]
         : ["SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"];
     for (const key of keys) {
@@ -1095,10 +1098,14 @@ export function installFixture(scenario, evidence) {
       if (ns !== namespaceId) {
         if (resource === "permissions" && namespaces.some((item) => item.id === ns)) {
           return response({
-            delete: !scenario.namespaceDeleteDenied,
+            delete: !scenario.namespaceDeleteDenied && !scenario.namespaceDeleteRestricted,
             agents: { create: true },
             secrets: { create: true },
-            installation: { administer: !scenario.observabilityDenied },
+            // A member refused delete is no Installation administrator; an administrator is
+            // refused it only by a Restriction.
+            installation: {
+              administer: !scenario.observabilityDenied && !scenario.namespaceDeleteDenied,
+            },
           });
         }
         return response([]);
@@ -1368,14 +1375,18 @@ export function installFixture(scenario, evidence) {
       }
       if (resource === "permissions" && method === "GET") {
         return response({
-          delete: !scenario.namespaceDeleteDenied,
+          delete: !scenario.namespaceDeleteDenied && !scenario.namespaceDeleteRestricted,
           agents: {
             create: !scenario.readOnlyPermissionSummary && !scenario.agentCreateRestricted,
           },
           secrets: { create: !scenario.secretCreateNotPermitted },
-          // A read-only member is no Installation administrator either.
+          // A read-only member is no Installation administrator either, nor is a member refused
+          // Namespace delete.
           installation: {
-            administer: !scenario.readOnlyPermissionSummary && !scenario.observabilityDenied,
+            administer:
+              !scenario.readOnlyPermissionSummary &&
+              !scenario.observabilityDenied &&
+              !scenario.namespaceDeleteDenied,
           },
         });
       }

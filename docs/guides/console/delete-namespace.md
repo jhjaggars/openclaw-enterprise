@@ -1,9 +1,12 @@
 # Delete a Namespace in the console
 
 Open **Namespaces** and select the trash icon in the Namespace's **Actions**
-column. You need Namespace `read` and `delete` on that exact Namespace. A
-disabled icon explains the missing permission; ask an Installation administrator
-for access, then select **Refresh**.
+column. Only an Installation administrator can delete a Namespace: Namespace
+IAM Roles cannot grant Namespace `delete`. For other people the icon is
+unavailable, and focusing it reads that reason. Ask an Installation
+administrator to delete the Namespace. A deny Restriction can also refuse
+deletion to an Installation administrator; then the reason names the
+Restriction. Ask whoever manages IAM Restrictions to lift it.
 
 1. Check the name and ID in the confirmation. Deletion cannot be undone, and
    the name remains reserved. Unchanged, automatically added Presets are removed
