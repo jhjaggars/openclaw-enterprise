@@ -307,11 +307,12 @@ func (r *runner) importOpenShellImage(ctx context.Context, state *developmentSta
 			resultErr = errors.Join(resultErr, fmt.Errorf("remove OpenShell %s image archive: %w", component, err))
 		}
 	}()
-	saveArgs := []string{"image", "save"}
-	if r.engine == "docker" {
-		saveArgs = append(saveArgs, "--platform", platform)
-	}
-	saveArgs = append(saveArgs, "--output", archive, recorded)
+	// The inspect above already verified the platform. `docker image save
+	// --platform` fails on every reference that resolves through a manifest
+	// list when the daemon uses the containerd image store (Docker 29),
+	// including the platform child itself, so save without it; the archive
+	// then carries every platform the list names and ctr imports them all.
+	saveArgs := []string{"image", "save", "--output", archive, recorded}
 	if err := r.run(ctx, r.engine, saveArgs...); err != nil {
 		return "", err
 	}

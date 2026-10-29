@@ -341,7 +341,7 @@ func TestKubernetesOnlyOpenShellGatewayInstallsImportedImagesBehindAClusterIP(t 
 "tag %s %s") ;;
 "image inspect --format {{json .RepoTags}} %s") echo '["%s"]' ;;
 "image inspect --format {{.Os}}/{{.Architecture}} %s") echo linux/amd64 ;;
-"image save --platform linux/amd64 --output "*" %s") printf archive > "$6" ;;
+"image save --output "*" %s") printf archive > "$4" ;;
 "exec k3d-occ-dev-owned-server-0 ctr -n k8s.io images tag %s docker.io/openclaw-development/openshell-%s@%s") ;;
 "image rm %s") ;;
 `, source, inspect, source, selection["OCC_DEVELOPMENT_OPENSHELL_SOURCE_REVISION"], staging, source, staging, staging, staging, source, staging, "docker.io/"+staging, component, digest, staging)
@@ -794,7 +794,7 @@ func TestOpenShellImageImportPreservesFailureBoundaries(t *testing.T) {
 		{"source", "exit 1", "must still exist locally"},
 		{"collision", ":", "staging image already exists"},
 		{"platform", "echo windows/amd64", "must contain a Linux platform"},
-		{"save", `printf archive > "$6"; exit 42`, "exit status 42"},
+		{"save", `printf archive > "$4"; exit 42`, "exit status 42"},
 		{"import", "exit 42", "k3d failed"},
 		{"list", "echo '" + stage + " manifest sha256:invalid'", "could not resolve imported"},
 		{"list", list + "; echo 'docker.io/" + stage + " manifest sha256:" + strings.Repeat("b", 64) + "'", "ambiguous imported"},
@@ -817,7 +817,7 @@ func TestOpenShellImageImportPreservesFailureBoundaries(t *testing.T) {
 "tag ` + source + ` ` + stage + `") ;;
 "image inspect --format {{json .RepoTags}} ` + stage + `") echo '["` + stage + `"]' ;;
 "image inspect --format {{.Os}}/{{.Architecture}} ` + source + `") ` + reply("platform", "echo linux/amd64") + ` ;;
-"image save --platform linux/amd64 --output "*" ` + stage + `") ` + reply("save", `printf archive > "$6"`) + ` ;;
+"image save --output "*" ` + stage + `") ` + reply("save", `printf archive > "$4"`) + ` ;;
 "exec k3d-occ-dev-owned-server-0 ctr -n k8s.io images list") ` + reply("list", list) + ` ;;
 "exec k3d-occ-dev-owned-server-0 ctr -n k8s.io images tag ` + stage + ` openclaw-development/openshell-gateway@` + profileTestDigest + `") ` + reply("register", ":") + ` ;;
 "image rm ` + stage + `") ` + reply("cleanup", ":") + ` ;;`,
