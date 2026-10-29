@@ -418,22 +418,31 @@ function writeCodexConfigToml(runtime) {
   const target = safeRuntimePath(process.env.CODEX_HOME, "config.toml");
   pluginMkdirSync(pluginDirname(target), { recursive: true });
   // A custom model endpoint configured for the harness reaches Codex the same
-  // way the runtime projects it for its own Codex spawns: as a provider entry.
-  // A dedicated provider (rather than the built-in openai base URL override)
-  // also selects the plain HTTP transport — the built-in provider always
-  // prefers WebSocket, which a relay-fronted endpoint may not serve — and the
-  // credential still flows from CODEX_HOME auth.json through the boundary.
+  // way the runtime projects it for its own Codex spawns: as a provider entry
+  // selected at the TOML root. A dedicated provider (rather than the built-in
+  // openai base URL override) also selects the plain HTTP transport — the
+  // built-in provider always prefers WebSocket, which a relay-fronted endpoint
+  // may not serve — and the credential still flows from CODEX_HOME auth.json
+  // through the boundary. A config that already selects a model provider keeps
+  // it: the admitted source endpoint stays the single endpoint authority.
   var customBaseUrl = process.env.OPENAI_BASE_URL;
   var content = runtime.codexConfigurationToml;
-  if (typeof customBaseUrl === "string" && customBaseUrl.length > 0) {
+  if (typeof customBaseUrl === "string" && customBaseUrl.length > 0 &&
+      !/^model_provider\s*=/.test(content)) {
+    // TOML places root keys before every table header, so the selector is
+    // inserted before the first header and the provider table is appended.
+    var headerIndex = content.startsWith("[") ? 0 : content.indexOf("\n[");
+    var selector = "model_provider = \"openclaw_model\"\n";
+    content = headerIndex < 0
+      ? content + "\n" + selector
+      : content.slice(0, headerIndex === 0 ? 0 : headerIndex + 1) + selector +
+        content.slice(headerIndex === 0 ? 0 : headerIndex + 1);
     content = content
-      + "[model_providers.openclaw_model]\n"
+      + "\n[model_providers.openclaw_model]\n"
       + "name = \"openclaw model endpoint\"\n"
       + "base_url = " + JSON.stringify(customBaseUrl) + "\n"
       + "wire_api = \"responses\"\n"
-      + "supports_websockets = false\n"
-      + "\n"
-      + "model_provider = \"openclaw_model\"\n";
+      + "supports_websockets = false\n";
   }
   pluginWriteFileSync(target, content, { mode: 0o600 });
 }
