@@ -1060,6 +1060,17 @@ interface NativeRuntimeSnapshot {
 }
 
 /** One rendering step; neither credential values nor backend lookups belong here. */
+/**
+ * The Codex provider's configured model endpoint, when it is a real custom
+ * endpoint. The fail-closed development placeholder and the built-in default
+ * (no baseUrl) both leave Codex on its own default endpoint.
+ */
+function codexModelBaseUrl(configuration: OpenClawConfigurationDocument): string | undefined {
+  const rawBaseUrl = asRecord(asRecord(asRecord(configuration.models)?.providers)?.codex)?.baseUrl;
+  const baseUrl = typeof rawBaseUrl === "string" ? rawBaseUrl.trim() : "";
+  return baseUrl === "" || baseUrl.startsWith("http://127.0.0.1:") ? undefined : baseUrl;
+}
+
 function prepareHarnessAuth(
   harness: RevisionHarnessDescriptor,
   resolvedAuth: ResolvedHarnessAuth,
@@ -1095,6 +1106,13 @@ function prepareHarnessAuth(
       environment.push({ name: "CODEX_LOGIN_MODE", value: resolvedAuth.loginMode });
       if (resolvedAuth.loginMode === "codex_pat") {
         environment.push({ name: "OCE_CODEX_CREDENTIAL_SOURCE", value: "1" });
+      }
+      const codexBaseUrl = codexModelBaseUrl(configuration);
+      if (codexBaseUrl !== undefined) {
+        // A custom model endpoint must reach the Codex CLI (its startup probe and
+        // the runtime both honor OPENAI_BASE_URL); without it Codex falls back to
+        // its built-in default endpoint and the credential is rejected there.
+        environment.push({ name: "OPENAI_BASE_URL", value: codexBaseUrl });
       }
     }
     return {

@@ -9086,6 +9086,23 @@ test("credential-source authentication renders no model Secret and requires the 
     { name: "CODEX_LOGIN_MODE", value: "api_key" },
   );
 
+  const customEndpointRevision = {
+    ...revision,
+    configuration: {
+      ...revision.configuration,
+      models: { providers: { codex: { baseUrl: "https://models.example.test/v1" } } },
+    },
+  };
+  const customEndpointPrepared = driver.harnessAuthForRevision(
+    customEndpointRevision,
+    { harnessAuth: { ...snapshot, source } },
+    namespace,
+  );
+  assert.deepEqual(
+    customEndpointPrepared.environment.find(({ name }) => name === "OPENAI_BASE_URL"),
+    { name: "OPENAI_BASE_URL", value: "https://models.example.test/v1" },
+  );
+
   const nativeRevision = {
     ...revision,
     harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" },
