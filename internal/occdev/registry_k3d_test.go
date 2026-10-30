@@ -339,7 +339,7 @@ func TestDevelopmentImageImportKeepsTheArchivePathForOtherImages(t *testing.T) {
 "tag ` + image + ` ` + staging + `") ;;
 "image inspect --format {{json .RepoTags}} ` + staging + `") echo '["` + staging + `"]' ;;
 "image inspect --format {{.Os}}/{{.Architecture}} ` + staging + `") echo linux/amd64 ;;
-"image save --output "*" ` + staging + `") printf archive > "$4" ;;
+"image save --platform linux/amd64 --output "*" ` + staging + `") printf archive > "$6" ;;
 "exec ` + server + ` ctr -n k8s.io images list") echo "` + staging + ` application/vnd.oci.image.manifest.v1+json ` + profileTestDigest + `" ;;
 "exec ` + server + ` ctr -n k8s.io images tag ` + staging + ` ` + reference + `") ;;
 "image rm ` + staging + `") ;;`,
@@ -415,7 +415,7 @@ func TestK3dRegistryAttachmentOrdering(t *testing.T) {
 "image inspect ` + registryTestRuntime + `") ;;
 "image inspect ` + controllerImage + `") ;;
 "image inspect ` + developmentPostgres + `") ;;
-` + imageCases + `"image save --output "*) ;;
+` + imageCases + `"image save --platform linux/amd64 --output "*) ;;
 ` + strings.ReplaceAll(registryPullCases(cluster, filepath.Join(root, "connected"), imageList), `"network disconnect k3d-`+cluster+` `+registryTestContainer+`") `,
 			`"network disconnect k3d-`+cluster+` `+registryTestContainer+`") [ -f `+shellQuote(filepath.Join(root, "deleted"))+` ] && exit 98; `),
 		"k3d": `"cluster list -o json") if [ -f ` + shellQuote(filepath.Join(root, "created")) + ` ]; then echo '[{"name":"` + cluster + `"}]'; else echo '[]'; fi ;;

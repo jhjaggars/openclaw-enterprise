@@ -214,7 +214,7 @@ func TestK3dCodexPreflightOrdering(t *testing.T) {
 "image inspect ` + runtimeImage + `") ;;
 "image inspect ` + controllerImage + `") ` + controllerPresent + ` ;;
 "image inspect ` + developmentPostgres + `") ;;
-` + imageCases + `"image save --output "*) ;;
+` + imageCases + `"image save --platform linux/amd64 --output "*) ;;
 "exec k3d-occ-dev-order-server-0 ctr -n k8s.io images list") printf '` + imageList + `' ;;`,
 				"k3d": `"cluster list -o json") if [ -f ` + shellQuote(filepath.Join(root, "created")) + ` ]; then echo '[{"name":"occ-dev-order"}]'; else echo '[]'; fi ;;
 "cluster create occ-dev-order "*) : > ` + shellQuote(filepath.Join(root, "created")) + ` ;;
