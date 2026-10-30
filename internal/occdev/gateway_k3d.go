@@ -508,7 +508,9 @@ func (r *runner) copyComposeGatewayCA(ctx context.Context, state *developmentSta
 	if !pool.AppendCertsFromPEM(certificate) {
 		return fmt.Errorf("private gateway CA Secret has invalid public certificate data")
 	}
-	return exclusiveWrite(filepath.Join(state.directory, "gateway-ca.crt"), certificate, 0600)
+	// The state directory is 0700; 0644 keeps the CA private on the host while
+	// the non-root Compose containers can read their bind mount.
+	return exclusiveWrite(filepath.Join(state.directory, "gateway-ca.crt"), certificate, 0644)
 }
 
 func (r *runner) prepareComposeDevelopmentRouting(
@@ -528,7 +530,9 @@ func (r *runner) prepareComposeDevelopmentRouting(
 	if err != nil {
 		return nil, err
 	}
-	if err := exclusiveWrite(filepath.Join(state.directory, "gateway-api-key"), []byte(key), 0600); err != nil {
+	// The state directory is 0700; 0644 keeps the key private on the host while
+	// the non-root Compose containers can read their bind mount.
+	if err := exclusiveWrite(filepath.Join(state.directory, "gateway-api-key"), []byte(key), 0644); err != nil {
 		return nil, err
 	}
 	secret := map[string]any{

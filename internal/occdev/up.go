@@ -244,13 +244,15 @@ func Up(ctx context.Context, opts Options) (result error) {
 	if err != nil {
 		return err
 	}
-	if err := exclusiveWrite(filepath.Join(directory, "openshell-client-secret"), secret, 0600); err != nil {
+	// The state directory is 0700, so 0644 keeps the secret private on the host
+	// while the non-root Compose containers can read their bind mount.
+	if err := exclusiveWrite(filepath.Join(directory, "openshell-client-secret"), secret, 0644); err != nil {
 		return err
 	}
 	started, clusterAttempted, clusterCreationFailed, keyWritten := false, false, false, false
 	defer func() {
 		defer lock.Close()
-		if result == nil {
+		if result == nil || os.Getenv("OCC_DEVELOPMENT_KEEP_ON_FAILURE") != "" {
 			return
 		}
 		if os.Getenv("OCC_DEVELOPMENT_KEEP_ON_FAILURE") != "" {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { accessSync, constants } from "node:fs";
-import { lstat, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";

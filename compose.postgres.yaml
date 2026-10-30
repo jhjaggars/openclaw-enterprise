@@ -14,6 +14,9 @@ services:
       - ./migrations/init-local.sql:/docker-entrypoint-initdb.d/00-occ-roles.sql:ro,Z
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d openclaw_enterprise"]
+      # pg_isready answers during the entrypoint's initdb phase, before the
+      # roles the migrate step needs exist; the start period covers first boot.
+      start_period: 10s
       interval: 2s
       timeout: 3s
       retries: 20

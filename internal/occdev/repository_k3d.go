@@ -341,15 +341,18 @@ func generateDevelopmentTLS(prefix, subject string, hostnames []string) (map[str
 }
 
 func replaceDevelopmentFile(path string, data []byte) error {
-	info, err := os.Lstat(path)
+	// Preserve the replaced file's mode: the Installation snapshot is 0644 so
+	// the non-root Compose containers can read their bind mounts, and rewriting
+	// it through a 0600 temporary would silently revoke that.
+	original, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() {
+	if !original.Mode().IsRegular() {
 		return fmt.Errorf("development file must be regular: %s", path)
 	}
 	temporary := path + ".next"
-	if err := exclusiveWrite(temporary, data, info.Mode().Perm()); err != nil {
+	if err := exclusiveWrite(temporary, data, original.Mode().Perm()); err != nil {
 		return err
 	}
 	if err := os.Rename(temporary, path); err != nil {
