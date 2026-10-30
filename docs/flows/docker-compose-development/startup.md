@@ -293,7 +293,8 @@ multi-arch lists that Docker's containerd image store (Docker 29) can neither
 save with `--platform` nor export completely, so
 `internal/occdev/k3d_import.go:resolveDevelopmentImageSource` re-points the
 staging tag at the registry's platform child and saves a complete
-single-platform archive; unlisted sources keep their reference and filter.
+single-platform archive; unlisted sources, and a child pull that fails, keep
+the pinned reference and filter.
 `importDevelopmentImage` resolves
 cluster digests. Both startup paths call
 `internal/occdev/status_proxy_k3d.go:developmentStatusProxySource` before

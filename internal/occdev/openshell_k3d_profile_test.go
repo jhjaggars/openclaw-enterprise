@@ -623,6 +623,60 @@ func TestOpenShellImageImportKeepsAPlainManifestSource(t *testing.T) {
 	}
 }
 
+// A cached source that exported before must keep exporting when the platform
+// child resolves in the listing but its pull fails, so the failed pull falls
+// back to the pinned reference instead of aborting the import.
+func TestOpenShellImageImportKeepsTheSourceWhenTheChildPullFails(t *testing.T) {
+	state := kubernetesOnlyOpenShellState(t)
+	root := t.TempDir()
+	source := "registry.example/gateway@" + profileTestDigest
+	child := "sha256:" + strings.Repeat("c", 64)
+	resolved := "registry.example/gateway@" + child
+	staging := "openclaw-development/openshell-gateway:" + state.Cluster
+	server := "k3d-" + state.Cluster + "-server-0"
+	listing := `{"manifest":{"manifests":[{"digest":"` + child + `","platform":{"os":"linux","architecture":"amd64"}}]}}`
+	commands := fakeProfileCommands(t, map[string]string{
+		"docker": `"image inspect ` + source + `") exit 1 ;;
+"pull ` + source + `") ;;
+"image inspect ` + staging + `") exit 1 ;;
+"tag ` + source + ` ` + staging + `") ;;
+"image inspect --format {{json .RepoTags}} ` + staging + `") echo '["` + staging + `"]' ;;
+"image inspect --format {{.Os}}/{{.Architecture}} ` + source + `") echo linux/amd64 ;;
+"buildx imagetools inspect --format {{json .}} ` + source + `") printf '%s\n' '` + listing + `' ;;
+"image inspect ` + resolved + `") exit 1 ;;
+"pull ` + resolved + `") echo 'registry unavailable' >&2; exit 1 ;;
+"image save --platform linux/amd64 --output "*" ` + staging + `") printf archive > "$6" ;;
+"exec ` + server + ` ctr -n k8s.io images list") echo "` + staging + ` application/vnd.oci.image.manifest.v1+json ` + profileTestDigest + `" ;;
+"exec ` + server + ` ctr -n k8s.io images tag ` + staging + ` openclaw-development/openshell-gateway@` + profileTestDigest + `") ;;
+"image rm ` + staging + `") ;;`,
+		"k3d": `"image import --mode direct "*" -c ` + state.Cluster + `") ;;`,
+	})
+	var stdout bytes.Buffer
+	r := newRunner(Options{Repository: state.Repository, Out: &stdout})
+	r.engine = "docker"
+
+	reference, err := r.importOpenShellImage(context.Background(), state, root, "gateway", source, false)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, strings.Join(commands(), "\n"))
+	}
+	calls := commands()
+	for _, call := range calls {
+		if strings.HasPrefix(call, "docker tag ") && call != "docker tag "+source+" "+staging {
+			t.Fatalf("the staging tag moved although the child pull failed: %v", calls)
+		}
+	}
+	save := "docker image save --platform linux/amd64 --output " + filepath.Join(root, "gateway-image.tar") + " " + staging
+	if !slices.Contains(calls, save) {
+		t.Fatalf("a failed child pull lost the pinned save path: %v", calls)
+	}
+	if !strings.Contains(stdout.String(), "Could not pull the platform child") {
+		t.Fatalf("the fallback was not reported: %q", stdout.String())
+	}
+	if reference != "openclaw-development/openshell-gateway@"+profileTestDigest {
+		t.Fatalf("unexpected runtime reference: %q", reference)
+	}
+}
+
 func TestKubernetesOnlyControlPlaneKeepsPostgreSQLAcrossClusterRestart(t *testing.T) {
 	realHelm, helmErr := exec.LookPath("helm")
 	state := kubernetesOnlyOpenShellState(t)

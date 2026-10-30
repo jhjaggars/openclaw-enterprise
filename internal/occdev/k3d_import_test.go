@@ -365,7 +365,8 @@ func TestDevelopmentImageImportTagsThePlatformChildOfAManifestList(t *testing.T)
 	recorded := "localhost/" + staging
 	reference := strings.TrimSuffix(recorded, ":"+state.Cluster) + "@" + child
 	server := "k3d-" + state.Cluster + "-server-0"
-	listing := `[{"Descriptor":{"digest":"` + child + `","platform":{"os":"linux","architecture":"amd64"}}},{"Descriptor":{"digest":"sha256:` + strings.Repeat("d", 64) + `","platform":{"os":"linux","architecture":"arm64"}}}]`
+	// Podman's `manifest inspect --verbose` prints the bare OCI index.
+	listing := `{"schemaVersion":2,"manifests":[{"digest":"` + child + `","platform":{"os":"linux","architecture":"amd64"}},{"digest":"sha256:` + strings.Repeat("d", 64) + `","platform":{"os":"linux","architecture":"arm64"}}]}`
 	commands := fakeProfileCommands(t, map[string]string{
 		"podman": `"image inspect ` + staging + `") exit 1 ;;
 "tag ` + image + ` ` + staging + `") ;;
