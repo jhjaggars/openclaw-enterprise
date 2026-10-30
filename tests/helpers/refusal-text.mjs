@@ -143,9 +143,9 @@ export const AGENT_CREATE_RESTRICTED =
 // Secrets and Namespaces follow the same rule: Namespace Roles cannot grant people create.
 export const SECRET_CREATE_DENIED =
   "Your access does not include creating Secrets in this Namespace. Only an Installation administrator can create Secrets: ask one to create it and to give you Secret read and operate on it.";
-// Create Agent for a member whose Installation read and Agent create are both refused (create.mts).
-export const AGENT_CREATE_INSTALLATION_DENIED =
-  "Creating an Agent needs Installation access that your account does not have. Ask an Installation administrator to create this Agent.";
+// The same refused Installation read when the Namespace permission read failed (finding 2110).
+export const AGENT_CREATE_PERMISSIONS_UNREAD =
+  "Your permissions in this Namespace could not be checked, and Installation-wide capabilities are not readable with your access. Retry the permission check before creating an Agent.";
 export const CONSOLE_NAMESPACE_CREATE_DENIED =
   "Your access does not include creating Namespaces in this Installation. Only an Installation administrator can create Namespaces: ask one to create a Namespace or to give you access to an existing one.";
 
@@ -188,6 +188,8 @@ export const STOP_CONFIRMATION = `This interrupts the current runtime gateway an
 export const STOP_FIRST_DEPLOYMENT_CONFIRMATION = `No version is serving yet, so this cancels the deployment in progress. ${STOP_KEEPS}`;
 // No version is selected and the page could not read the latest deployment's outcome.
 export const STOP_UNKNOWN_DEPLOYMENT_CONFIRMATION = `This cancels a deployment in progress or, if a version already started, interrupts its runtime gateway and ends any reply in progress. ${STOP_KEEPS}`;
+// The Agent is already requested to stop: Request Stop again only repeats the request (D815).
+export const STOP_REPEAT_CONFIRMATION = `This Agent is already requested to stop. This sends the stop request again; use it if an earlier stop did not finish. ${STOP_KEEPS}`;
 // The Agent page's Stop row, by whether Stop would cancel a first deployment in progress.
 export const STOP_CANCELS_FIRST_DEPLOYMENT =
   "Cancels the deployment in progress. The Agent stays and can be deployed again.";
@@ -222,6 +224,10 @@ export const SANDBOX_POLICY_READ_DENIED = notIncluded(
   "reading this Agent’s network policy or its suggestions",
   "SandboxPolicy read on it",
 );
+// Deploy checks the same read when the policy has saved rules; the Agent page names the policy in
+// words, not by the ID the API's denial gives (finding D801).
+export const DEPLOY_SANDBOX_POLICY_READ_DENIED =
+  "Deploying this Agent needs SandboxPolicy read on its network policy, which your access does not include. Ask an Installation administrator to grant it.";
 // The Logs tab's refusals use the API's grant words for log text (finding 2599).
 export const LOG_TEXT_DENIED =
   "Log text requires Agent read_logs (or Agent administer) on this Agent. Ask an Installation administrator to grant it.";
@@ -231,8 +237,9 @@ export const RUNTIME_STATUS_DENIED =
   "Runtime status requires Agent operate on this Agent and AgentRevision read on this version. Ask an Installation administrator to grant them.";
 export const RUNTIME_STATUS_OPERATE_DENIED =
   "Runtime status requires Agent operate on this Agent. Ask an Installation administrator to grant it.";
-export const RUNTIME_STATUS_VERSION_DENIED =
-  "Runtime status requires AgentRevision read on this version. Ask an Installation administrator to grant it.";
+// A version the page could not read: the strip says so instead of reading status (finding D794).
+export const RUNTIME_STATUS_VERSION_UNREADABLE =
+  "You cannot read this version, so its runtime status is not shown. Ask an Installation administrator for AgentRevision read on it.";
 // A version link the page cannot list may name a version that does not exist: the API answers
 // both alike, so the console says either may be true (finding D750).
 export const VERSION_UNAVAILABLE =
@@ -478,10 +485,12 @@ const SLACK_TOKEN_OBJECTS = { secretRef: "a SecretRef", object: "an object" };
 export const unreadableSlackTokenRefusal = (setting, held) =>
   `Configuration setting ${setting} holds ${SLACK_TOKEN_OBJECTS[held]} the Slack Channel Driver cannot read: use an env SecretRef with provider default, or one whole \${NAME}, bound in secretBindings.`;
 // Where the console says to add a Secret binding that a channel refusal asks for: the Agent
-// page's Configuration JSON editor saves none (finding 2494), and Create Agent binds only Slack's
-// standard names (finding 2506).
-export const CHANNEL_BINDING_CONSOLE_REMEDY =
-  "This editor does not save Secret bindings: bind SLACK_APP_TOKEN and SLACK_BOT_TOKEN on the Credentials tab or in the Slack editor on the Channels tab, and other names through the Configuration API.";
+// page's Configuration JSON editor saves none (finding 2494), the Credentials tab binds only Slack's
+// standard names (finding 2542), and Create Agent binds only those too (finding 2506).
+const CHANNEL_BINDING_PLACES =
+  "bind SLACK_APP_TOKEN and SLACK_BOT_TOKEN on the Credentials tab or in the Slack editor on the Channels tab, and other names through the Configuration API.";
+export const CHANNEL_BINDING_CONSOLE_REMEDY = `This editor does not save Secret bindings: ${CHANNEL_BINDING_PLACES}`;
+export const CHANNEL_BINDING_CREDENTIALS_REMEDY = `To fix it, ${CHANNEL_BINDING_PLACES}`;
 // The Slack card of an Embedded Agent, on Create Agent and the Agent page's Channels tab.
 export const CHANNELS_NEED_DEDICATED =
   "Channels require Dedicated execution. Embedded Agents can only keep channels disabled.";
@@ -555,9 +564,7 @@ export const CREDENTIAL_PROXY_GIT_ALONE =
 export const CREDENTIAL_PROXY_INSTALLATION_PREVIEW =
   "Installation-wide repository access (profile github-installation) needs the OpenShell Credential Proxy's observed-hook preview, which this Installation does not enable. Choose another profile, or ask an Installation administrator to enable the preview.";
 export const PROXY_REGISTRATION_UNAVAILABLE =
-  "The OpenShell gateway does not offer the protected egress middleware the Credential Proxy is configured to use. Ask an operator to check the gateway's middleware registration and version, then retry.";
-export const PREVIEW_GATEWAY_VERSION =
-  "Installation-wide repository access uses the observed-hook preview, which needs OpenShell gateway 0.1.5, and the gateway reports another version. Ask an operator to run 0.1.5 or turn the preview off, then retry.";
+  "The OpenShell gateway does not offer the protected egress middleware the Credential Proxy is configured to use. Ask an operator to check the gateway's middleware registration, protocol and capabilities, then retry.";
 export const storedCredentialSourceConfig = (field) =>
   `This credential source's saved ${field} no longer meets the OpenShell Credential Gateway's rules, so it cannot be used. Create a new source with a valid ${field}, bind it in place of this one, then delete this one.`;
 export const SERVICE_ACCOUNT_NO_BACKEND_BINDING =
@@ -712,3 +719,11 @@ export const workspaceWithoutRunningVersion = (agentId) =>
   `Agent ${agentId} has no running version, so its workspace files cannot be read or written. Deploy it, then try again.`;
 export const workspaceVersionStarting = (agentId) =>
   `Agent ${agentId} has no running version yet: its deployment is still starting, so its workspace files cannot be read or written. Try again when the deployment finishes.`;
+// Finding D788. Namespace IAM Roles cannot grant Namespace delete, so a member's trash icon names
+// who can delete the Namespace instead of a grant to ask for.
+export const NAMESPACE_DELETE_DENIED =
+  "Only an Installation administrator can delete a Namespace. Ask one to delete this Namespace.";
+// The same icon for an Installation administrator whom a deny Restriction keeps from deleting the
+// Namespace (finding 2861): administration cannot lift it.
+export const NAMESPACE_DELETE_RESTRICTED =
+  "A Restriction denies deleting this Namespace, even for Installation administrators. Ask whoever manages IAM Restrictions to lift it.";

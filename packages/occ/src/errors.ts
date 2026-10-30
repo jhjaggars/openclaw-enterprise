@@ -895,12 +895,18 @@ export class AgentDeletingError extends ResourceConflictError {
 export class NamespaceNotEmptyError extends ResourceConflictError {
   /** Public resource kinds that still occupy the Namespace, such as "Presets". */
   readonly contents: readonly string[];
-  /** IDs of the remaining resources of each kind, so an operator can delete them. */
+  /**
+   * IDs of remaining resources of each kind that the caller may read, so an operator can
+   * delete them. Unreadable resources are only counted (finding 2724).
+   */
   readonly ids: Readonly<Record<string, readonly string[]>>;
+  /** How many resources of each kind remain, named or not; defaults to the named IDs. */
+  readonly counts: Readonly<Record<string, number>>;
 
   constructor(
     contents: readonly string[] = [],
     ids: Readonly<Record<string, readonly string[]>> = {},
+    counts: Readonly<Record<string, number>> = {},
   ) {
     super("The Namespace must be empty before deletion.");
     this.name = "NamespaceNotEmptyError";
@@ -908,6 +914,14 @@ export class NamespaceNotEmptyError extends ResourceConflictError {
     this.ids = Object.freeze(
       Object.fromEntries(
         Object.entries(ids).map(([kind, list]) => [kind, Object.freeze([...list])]),
+      ),
+    );
+    this.counts = Object.freeze(
+      Object.fromEntries(
+        this.contents.map((kind) => [
+          kind,
+          Math.max(counts[kind] ?? 0, this.ids[kind]?.length ?? 0),
+        ]),
       ),
     );
   }
@@ -1382,16 +1396,16 @@ export class StoredCredentialSourceConfigError extends ResourceStateConflictErro
 }
 
 /**
- * The selected Credential Gateway's catalog lacks a source type: registration names one it does
- * not offer, or a configuration change dropped an existing source's type (OpenShell offers
- * `bearer-token` only with `toolBinaries`). An Installation property, raised only after the
- * caller's grant and the source lookup, so it reveals nothing a 403 or 404 hides. The fixed
- * message names the fix.
+ * The selected credential owner does not offer the source type. This Installation property
+ * is reported only after the caller's grant and source lookup, so it reveals nothing a 403
+ * or 404 hides. The message identifies the configuration to check.
  */
 export class CredentialSourceTypeNotOfferedError extends ResourceStateConflictError {
-  constructor() {
+  constructor(owner: "gateway" | "proxy" = "gateway") {
     super(
-      "The Credential Gateway does not offer this credential source type. An Installation administrator must enable it, for example toolBinaries for OpenShell bearer-token; see https://docs-enterprise.openclaw.org/reference/drivers/openshell-credential-gateway/",
+      owner === "proxy"
+        ? "The Credential Proxy does not offer this credential source type. An Installation administrator must check the selected Credential Proxy's provider configuration and any required token issuer."
+        : "The Credential Gateway does not offer this credential source type. An Installation administrator must enable it, for example toolBinaries for OpenShell bearer-token; see https://docs-enterprise.openclaw.org/reference/drivers/openshell-credential-gateway/",
     );
     this.name = "CredentialSourceTypeNotOfferedError";
   }
@@ -1485,9 +1499,7 @@ const RETRY_LATER_MESSAGES = Object.freeze({
   deviceLoginFailed: () =>
     "The sign-in service did not complete this device login, so it was cancelled. Start a new device login. If it keeps failing, ask an operator to check the API logs.",
   proxyRegistration: () =>
-    "The OpenShell gateway does not offer the protected egress middleware the Credential Proxy is configured to use. Ask an operator to check the gateway's middleware registration and version, then retry.",
-  previewGatewayVersion: () =>
-    "Installation-wide repository access uses the observed-hook preview, which needs OpenShell gateway 0.1.5, and the gateway reports another version. Ask an operator to run 0.1.5 or turn the preview off, then retry.",
+    "The OpenShell gateway does not offer the protected egress middleware the Credential Proxy is configured to use. Ask an operator to check the gateway's middleware registration, protocol and capabilities, then retry.",
 });
 
 /**
@@ -1497,12 +1509,12 @@ const RETRY_LATER_MESSAGES = Object.freeze({
  * workers still retry it. A failed device login keeps the Refresh Driver's error as `cause`, so
  * the API's 503 log record, which the text points the caller to, names that error's class and
  * code (never its message). The bundled OpenShell Credential Proxy raises the gateway states an
- * operator can fix (`proxyRegistration`, `previewGatewayVersion`) from its availability check.
+ * operator can fix (`proxyRegistration`) from its availability check.
  */
 export class RetryLaterError extends DependencyUnavailableError {
   constructor(reason: "deviceLoginFailed", cause: unknown);
   constructor(reason: "registrationFence", seconds: number);
-  constructor(reason: "proxyRegistration" | "previewGatewayVersion");
+  constructor(reason: "proxyRegistration");
   constructor(reason: keyof typeof RETRY_LATER_MESSAGES, detail?: unknown) {
     super(
       RETRY_LATER_MESSAGES[reason](

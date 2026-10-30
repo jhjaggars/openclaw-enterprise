@@ -9,11 +9,13 @@ import {
   nativeValues,
   newPage,
   persistedDeploymentError,
+  settledView,
   trackSettledFetches,
   waitForCondition,
   waitForIdleFetches,
 } from "./console-agents-browser-helpers.mjs";
-import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
+import { refocus, tagView, viewTag } from "./console-refocus-helpers.mjs";
+import { createReadyConsoleNamespace } from "../helpers/console-ready-namespace.mjs";
 import { apiErrorResponse } from "../helpers/api-error.mjs";
 import { GENERIC_DENIAL } from "../helpers/refusal-text.mjs";
 
@@ -27,7 +29,6 @@ const browser = fileBrowser();
 const AGENTS = 12;
 const READING = "Reading deployment…";
 const activeView = '.content [aria-live="polite"]:not([inert])';
-const settledView = '.content [aria-live="polite"][aria-busy="false"]:not([inert])';
 const revisionsRead = (namespace) => `**/namespaces/${namespace.id}/agents/*/revisions`;
 const deploymentsRead = (namespace) => `**/namespaces/${namespace.id}/agents/*/deployments/*`;
 
@@ -125,17 +126,6 @@ const revealed = (page) =>
     deployments: globalThis.__revealed.deployments,
     agents: [...globalThis.__revealed.agents].sort(),
   }));
-
-function tagView(page) {
-  return page.evaluate(() => {
-    globalThis.document.querySelector('.content [aria-live="polite"]').dataset.listTag = "kept";
-  });
-}
-const viewTag = (page) =>
-  page.evaluate(
-    () =>
-      globalThis.document.querySelector('.content [aria-live="polite"]')?.dataset.listTag ?? null,
-  );
 
 async function openAgent(page, agent) {
   await page.locator(settledView).getByRole("link", { name: agent.name, exact: true }).click();
@@ -279,6 +269,87 @@ test("A return rereads only the rows the search shows", async (t) => {
     [...new Set(revisions)],
     [`/namespaces/${namespace.id}/agents/${target.id}/revisions`],
   );
+});
+
+// A row read in the page, by kind and Agent; null for any other request.
+function rowReadOf(request) {
+  const match = new URL(request.url()).pathname.match(
+    /\/agents\/([^/]+)\/(permissions|revisions|deployments)(?:\/|$)/,
+  );
+  return match ? { agent: match[1], kind: match[2] } : null;
+}
+
+// A long list queues most of its row reads in the browser. A search that hides a row must retire
+// its unfinished reads, not send them after the matching row's, and a row shown again reads once.
+test("A search retires the unfinished reads of the rows it hides, and clearing it reads each once", async (t) => {
+  const { namespace, agents, page } = await openTeamList(t, "Team search retire");
+  const [, , target] = agents;
+  const rows = await holdRowReads(t, page, namespace);
+  const permissions = await holdRequests(
+    t,
+    page,
+    `**/namespaces/${namespace.id}/agents/*/permissions`,
+  );
+  const issued = new Set();
+  const cancelled = new Set();
+  const finished = [];
+  page.on("request", (request) => {
+    if (rowReadOf(request)) {
+      issued.add(request.url());
+    }
+  });
+  page.on("requestfailed", (request) => {
+    if (rowReadOf(request)) {
+      cancelled.add(request.url());
+    }
+  });
+  page.on("requestfinished", (request) => {
+    const read = rowReadOf(request);
+    if (read) {
+      finished.push(`${read.kind} ${read.agent}`);
+    }
+  });
+  const reads = (selected) =>
+    selected
+      .flatMap((agent) =>
+        ["deployments", "permissions", "revisions"].map((k) => `${k} ${agent.id}`),
+      )
+      .sort();
+  const search = page.getByRole("searchbox", { name: "Search Agents" });
+
+  // A reload reads every row again, and the holds keep those reads unfinished.
+  await page.reload();
+  await page.locator(settledView).getByRole("link", { name: agents[0].name }).waitFor();
+  await waitForCondition(
+    () => issued.size === AGENTS * 2,
+    "every row's permissions and revisions reads were issued",
+  );
+
+  // The page cancels the held reads of the 11 rows the search hides before any is answered.
+  await search.fill(target.name);
+  assert.equal(await page.locator(activeView).locator(".agent-table tbody tr").count(), 1);
+  await waitForCondition(
+    () => cancelled.size === (AGENTS - 1) * 2,
+    "the page cancelled the hidden rows' unfinished reads",
+  );
+  rows.release();
+  permissions.release();
+  const row = page.locator(activeView).getByRole("row").filter({ hasText: target.name });
+  await row.locator(".agent-deployment a").waitFor();
+  await waitForCondition(() => finished.length >= 3, "the shown row's reads finished");
+  assert.deepEqual(
+    [...finished].sort(),
+    reads([target]),
+    "only the row the search shows finished its reads",
+  );
+
+  // Showing the other rows again reads each once; the row that finished does not read again.
+  finished.length = 0;
+  await search.fill("");
+  await page.getByText(READING).first().waitFor({ state: "detached" });
+  const others = agents.filter((agent) => agent.id !== target.id);
+  await waitForCondition(() => finished.length >= others.length * 3, "the other rows' reads");
+  assert.deepEqual([...finished].sort(), reads(others), "each retired row read once");
 });
 
 // Back from a deployment link restores focus in that cell, not a link to the old revision.
@@ -587,7 +658,7 @@ test("A list resumed while its rows wait to fill shows only the new rereads", as
   await land(50);
   assert.equal(await readingCells(), 3);
   const rereads = await holdRowReads(t, page, namespace);
-  await page.evaluate(() => globalThis.dispatchEvent(new Event("focus")));
+  await refocus(page);
   await rereads.revisions.requested;
   await page.locator(settledView).getByRole("table", { name: "Agents" }).waitFor();
   await page.clock.runFor(200);
@@ -609,7 +680,7 @@ test("A list held by a refocus while its rows wait to fill paints no earlier ans
     once: true,
   });
   const rereads = await holdRowReads(t, page, namespace);
-  await page.evaluate(() => globalThis.dispatchEvent(new Event("focus")));
+  await refocus(page);
   await list.requested;
   await page.clock.runFor(200);
   // The held view is inert, so read it directly: deploymentCells reads only the active view.
@@ -1230,6 +1301,7 @@ test("Agents list search stays responsive with joiner-run names", async (t) => {
 // The Agents list showed the current version as a raw revision ID beside "v122 · succeeded", and
 // the Agent page called the same outcome "Completed" (finding 2093). The list now names the
 // current version by number, read with the row's versions, and shares the page's outcome words.
+// One the reader cannot read is named in words (finding D789).
 test("Agents list names the current version by number in the page's outcome words", async (t) => {
   const { fixture, namespace, agents, page } = await openTeamList(t, "Version numbers", {
     newer: [0],
@@ -1261,54 +1333,69 @@ test("Agents list names the current version by number in the page's outcome word
   });
   assert.equal(await page.locator(".agent-table").getByText(/rev_/).count(), 0);
 
-  // A current version older than the first page of versions is read on its own.
-  const { page: paged } = await newPage(t, fixture, { browser });
-  await paged.route(`**/namespaces/${namespace.id}/agents/${newer.id}/revisions`, async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    body.data = body.data.filter((revision) => revision.revision !== 1);
-    await route.fulfill({ response, json: body });
-  });
-  await paged.route(deploymentsRead(namespace), (route) =>
-    route.fulfill(deploymentRecord(namespace, "succeeded")),
-  );
+  // The reader's first page of versions leaves out v1, the current version: one she cannot read,
+  // or, when an older page follows, one that may be on it. `status` is v2's deployment outcome.
   const activeId = (await active(newer)).activeRevisionId;
-  const direct = paged.waitForRequest((request) =>
-    new URL(request.url()).pathname.endsWith(`/agents/${newer.id}/revisions/${activeId}`),
-  );
-  await login(paged, fixture, `/console/agents?namespace=${namespace.id}`);
-  await direct;
-  const pagedRow = paged.locator(settledView).getByRole("row").filter({ hasText: newer.name });
-  await pagedRow.getByRole("link", { name: "v2 · Completed", exact: true }).waitFor();
-  await pagedRow.getByRole("link", { name: "v1", exact: true }).waitFor();
+  const openWithout = async ({ olderPage, status, current }) => {
+    const { page: opened } = await newPage(t, fixture, { browser });
+    await opened.route(
+      `**/namespaces/${namespace.id}/agents/${newer.id}/revisions`,
+      async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.data = body.data.filter((revision) => revision.revision !== 1);
+        body.meta.nextCursor = olderPage ? "older-page" : null;
+        await route.fulfill({ response, json: body });
+      },
+    );
+    const reads = { count: 0 };
+    await opened.route(`**/agents/${newer.id}/revisions/${activeId}`, (route) => {
+      reads.count += 1;
+      return current
+        ? route.continue()
+        : route.fulfill(apiErrorResponse(403, "FORBIDDEN", GENERIC_DENIAL));
+    });
+    await opened.route(deploymentsRead(namespace), (route) =>
+      route.fulfill(deploymentRecord(namespace, status)),
+    );
+    await login(opened, fixture, `/console/agents?namespace=${namespace.id}`);
+    const row = () => opened.locator(settledView).getByRole("row").filter({ hasText: newer.name });
+    const currentCell = () => row().locator('[data-label="Current version"]');
+    return { page: opened, row, currentCell, reads };
+  };
 
-  // A current version the reader cannot read keeps its ID, and its audited 403 is asked once per
-  // tab, not on every list view.
-  const { page: denied } = await newPage(t, fixture, { browser });
-  await denied.route(
-    `**/namespaces/${namespace.id}/agents/${newer.id}/revisions`,
-    async (route) => {
-      const response = await route.fetch();
-      const body = await response.json();
-      body.data = body.data.filter((revision) => revision.revision !== 1);
-      await route.fulfill({ response, json: body });
-    },
-  );
-  let deniedReads = 0;
-  await denied.route(`**/agents/${newer.id}/revisions/${activeId}`, (route) => {
-    deniedReads += 1;
-    return route.fulfill(apiErrorResponse(403, "FORBIDDEN", GENERIC_DENIAL));
-  });
-  await denied.route(deploymentsRead(namespace), (route) =>
-    route.fulfill(deploymentRecord(namespace, "succeeded")),
-  );
-  await login(denied, fixture, `/console/agents?namespace=${namespace.id}`);
-  const deniedRow = () =>
-    denied.locator(settledView).getByRole("row").filter({ hasText: newer.name });
-  const idLink = `${activeId.slice(0, 12)}…${activeId.slice(-6)}`;
-  await deniedRow().getByRole("link", { name: idLink, exact: true }).waitFor();
-  await denied.reload();
-  await deniedRow().getByRole("link", { name: "v2 · Completed", exact: true }).waitFor();
-  await deniedRow().getByRole("link", { name: idLink, exact: true }).waitFor();
-  assert.equal(deniedReads, 1);
+  // A current version older than the first page of versions is read on its own.
+  const paged = await openWithout({ olderPage: true, status: "succeeded", current: true });
+  await paged.row().getByRole("link", { name: "v2 · Completed", exact: true }).waitFor();
+  await paged.row().getByRole("link", { name: "v1", exact: true }).waitFor();
+  assert.equal(paged.reads.count, 1);
+
+  // When the first page lists every version she can read, the current version is one she cannot,
+  // and the list says so without reading it, as the Agent page does. Reading it was an audited
+  // 403 on every list load, and the cell showed its raw ID (finding D789). Beside v2's succeeded
+  // deployment it is newer than v2.
+  const NEWER_UNREADABLE = "A newer version you cannot read";
+  const complete = await openWithout({ olderPage: false, status: "succeeded", current: false });
+  await complete.currentCell().getByText(NEWER_UNREADABLE, { exact: true }).waitFor();
+  await complete.page.reload();
+  await complete.row().getByRole("link", { name: "v2 · Completed", exact: true }).waitFor();
+  await complete.currentCell().getByText(NEWER_UNREADABLE, { exact: true }).waitFor();
+  assert.equal(await complete.currentCell().getByRole("link").count(), 0);
+  assert.equal(await complete.page.locator(".agent-table").getByText(/rev_/).count(), 0);
+  assert.equal(complete.reads.count, 0);
+
+  // Beside a deployment still in progress, the current version may be older or newer.
+  const running = await openWithout({ olderPage: false, status: "running", current: false });
+  await running.row().getByRole("link", { name: "v2 · In progress", exact: true }).waitFor();
+  await running.currentCell().getByText("A version you cannot read", { exact: true }).waitFor();
+  assert.equal(running.reads.count, 0);
+
+  // With an older page, the read's 403 says the same, and is asked once per tab, not on every
+  // list view.
+  const denied = await openWithout({ olderPage: true, status: "succeeded", current: false });
+  await denied.currentCell().getByText(NEWER_UNREADABLE, { exact: true }).waitFor();
+  await denied.page.reload();
+  await denied.row().getByRole("link", { name: "v2 · Completed", exact: true }).waitFor();
+  await denied.currentCell().getByText(NEWER_UNREADABLE, { exact: true }).waitFor();
+  assert.equal(denied.reads.count, 1);
 });
