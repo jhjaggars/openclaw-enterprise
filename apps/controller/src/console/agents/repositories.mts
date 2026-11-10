@@ -227,6 +227,8 @@ export function createRepositoryFields(
   // Set before any render: a held form renders before its first read (finding 2909).
   let searchState: SearchState = { query: "", browsing: false, dismissed: false, page: 0 };
   let loadGeneration = 0;
+  let deploymentRequiresRepository = false;
+  let loadedAfterReset = false;
   const status = element(
     "p",
     { className: "hint", role: "status" },
@@ -278,26 +280,28 @@ export function createRepositoryFields(
     cards,
     announcements,
     validation,
-    element(
-      "details",
-      { className: "repository-access-details" },
-      element("summary", {}, "Runtime support and access limits"),
-      element(
-        "p",
-        { className: "hint" },
-        "Embedded OpenClaw and Dedicated Codex on Kubernetes, without a Sandbox Driver. Deployment rechecks runtime compatibility. Model authentication is configured separately.",
-      ),
-      element(
-        "p",
-        { className: "hint" },
-        "GitHub App keys and installation tokens stay outside the Agent. The Agent receives bounded gateway authentication material and client configuration.",
-      ),
-      element(
-        "p",
-        { className: "hint" },
-        "API access is bounded by the selected level and installation token. GraphQL can also return public information allowed by GitHub. Unselected private repositories remain outside the grant.",
-      ),
-    ),
+    initial.agentId
+      ? null
+      : element(
+          "details",
+          { className: "repository-access-details" },
+          element("summary", {}, "Runtime support and access limits"),
+          element(
+            "p",
+            { className: "hint" },
+            "Embedded OpenClaw and Dedicated Codex on Kubernetes, without a Sandbox Driver. Deployment rechecks runtime compatibility. Model authentication is configured separately.",
+          ),
+          element(
+            "p",
+            { className: "hint" },
+            "GitHub App keys and installation tokens stay outside the Agent. The Agent receives bounded gateway authentication material and client configuration.",
+          ),
+          element(
+            "p",
+            { className: "hint" },
+            "API access is bounded by the selected level and installation token. GraphQL can also return public information allowed by GitHub. Unselected private repositories remain outside the grant.",
+          ),
+        ),
   );
   const option = (ref: string) => state.options.find((entry) => entry.repositoryRef === ref);
   // Only new selections may derive the collaborator profile from the Contributor default.
@@ -604,6 +608,9 @@ export function createRepositoryFields(
     if (state.discovery !== "ready" || !state.options.length) {
       return;
     }
+    const searchSummary = matches.length
+      ? `${matches.length} matching ${matches.length === 1 ? "repository" : "repositories"}`
+      : "No repositories match this search. If a repository is missing, ask your Namespace operator.";
     results.append(
       element(
         "div",
@@ -613,7 +620,7 @@ export function createRepositoryFields(
           "p",
           { className: "hint", role: "status" },
           query
-            ? `${matches.length} matching ${matches.length === 1 ? "repository" : "repositories"}`
+            ? searchSummary
             : !small &&
                 !searchState.browsing &&
                 matches.some((entry) => recent.includes(entry.repositoryRef))
@@ -690,15 +697,6 @@ export function createRepositoryFields(
     }
     if (visible.length) {
       results.append(list);
-    }
-    if (!visible.length) {
-      results.append(
-        element(
-          "p",
-          { className: "hint" },
-          query ? "No repositories match this search." : "No approved repositories.",
-        ),
-      );
     }
     if (!small && !searchState.browsing && matches.length > count) {
       results.append(
@@ -1079,15 +1077,8 @@ export function createRepositoryFields(
       });
       state.discovery = "ready";
       choices.setAttribute("aria-busy", "false");
-      if (clearSelections) {
-        status.textContent = options.length
-          ? "Select current repositories and an authorization level to retry this Agent, or start a new draft."
-          : "No approved repositories are available for this Namespace. Start a new draft to continue without repository access.";
-      } else {
-        status.textContent = options.length
-          ? "Select repositories for this Agent. Leave all unselected to continue without repository access."
-          : "No approved repositories are available for this Namespace. You can continue without repository access.";
-      }
+      loadedAfterReset = clearSelections;
+      showReadyStatus();
       revealInvalidSelections();
       render();
       onChange(false);
@@ -1163,13 +1154,45 @@ export function createRepositoryFields(
     };
   }
 
+  function showReadyStatus() {
+    if (!state.options.length) {
+      const next = deploymentRequiresRepository
+        ? ""
+        : loadedAfterReset
+          ? " Start a new draft to continue without repository access."
+          : " You can continue without repository access.";
+      status.textContent = `No approved repositories are available for this Namespace. Ask your Namespace operator about missing repositories.${next}`;
+    } else {
+      status.textContent = loadedAfterReset
+        ? "Select current repositories and an authorization level to retry this Agent, or start a new draft."
+        : deploymentRequiresRepository
+          ? "Select approved repository access for this Agent."
+          : "Select repositories for this Agent. Leave all unselected to continue without repository access.";
+    }
+  }
+
+  function setDeploymentRequiresRepository(required: boolean) {
+    if (deploymentRequiresRepository === required) {
+      return;
+    }
+    deploymentRequiresRepository = required;
+    if (state.discovery === "ready") {
+      showReadyStatus();
+    } else if (state.discovery === "draft-only" || state.discovery === "not-configured") {
+      showSetupLink();
+    }
+  }
+
   // The status line for an Installation without repository access. Only an Installation
   // administrator can set it up, so only a known administrator gets the setup guide; anyone else
   // is told whom to ask, in the console's words (finding D754).
   function showSetupLink() {
     setStatusTone(status, null);
-    const next =
-      state.selected.size > 0
+    const next = deploymentRequiresRepository
+      ? state.selected.size > 0
+        ? " Remove unavailable repository selections."
+        : ""
+      : state.selected.size > 0
         ? ` Remove the selected repositories${initial.agentId ? " and save" : ""} to continue without repository access.`
         : !initial.agentId
           ? " You can continue without repository access."
@@ -1216,6 +1239,7 @@ export function createRepositoryFields(
     validate,
     hasValidSelection,
     setDisabled,
+    setDeploymentRequiresRepository,
     reload: () => load(true),
     /** Reads the choices a held form has not read yet; once read, retries go through Retry. */
     start: () => {

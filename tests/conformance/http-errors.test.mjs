@@ -271,13 +271,23 @@ const cases = [
     },
   ],
   [
-    "a repository profile a Credential Proxy cannot deliver names the supported profiles",
-    new RepositoryGitProfileUnsupportedError(),
+    "several repository bindings a Credential Proxy cannot deliver name the fix for all of them",
+    new RepositoryGitProfileUnsupportedError(2),
     {
       status: 409,
       code: "REPOSITORY_GIT_PROFILE_UNSUPPORTED",
       message:
-        "A Credential Proxy delivers repository Git only for one git-write or github-installation binding, so this Agent's repository access cannot start. Keep one such binding, remove them, or use native prepared Git without a Sandbox or Proxy, then deploy again.",
+        "To use more than one repository, set each one to use its approved GitHub App permissions. API callers: set `profile` to `github-repository` for each entry in `repositoryBindings`.",
+    },
+  ],
+  [
+    "one repository binding a Credential Proxy cannot deliver names the supported profiles",
+    new RepositoryGitProfileUnsupportedError(1),
+    {
+      status: 409,
+      code: "REPOSITORY_GIT_PROFILE_UNSUPPORTED",
+      message:
+        "A Credential Proxy cannot deliver this repository's Git access level. Use `github-repository` or `git-write` for it, or ask an administrator to use native prepared Git without a Sandbox or Proxy, then deploy again.",
     },
   ],
   [
@@ -337,6 +347,16 @@ const cases = [
       status: 409,
       code: "RESOURCE_CONFLICT",
       message: storedCredentialSourceConfig("token_url"),
+    },
+  ],
+  [
+    "a stored openai credential source with removed base_url names the supported replacement and rollout order",
+    new StoredCredentialSourceConfigError("base_url"),
+    {
+      status: 409,
+      code: "RESOURCE_CONFLICT",
+      message:
+        "Saved config.base_url was removed. If supported, register a replacement for the same URL. Its config.authorized_base_url must permit the destination selected by the Agent revision. Rebind and redeploy Agents, then delete the old source once unused.",
     },
   ],
   [
@@ -1542,7 +1562,8 @@ test("a caller denial names each checked grant without disclosing a Restriction 
         /restriction-1|binding-1|role-1|prn_caller|matching|binding grants/,
         label,
       );
-      // No Role can hold create, so a create denial never asks for a grant (finding 2581).
+      // Only Roles from the Installation configuration hold create, and only OCC binds them, so
+      // a create denial never asks for a grant (finding 2581).
       if (action === "create" && kind !== "installation") {
         assert.match(
           restricted,

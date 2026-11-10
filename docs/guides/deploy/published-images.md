@@ -47,8 +47,12 @@ else
 fi
 ```
 
-Stop if selection fails. If an anonymous pull fails with `unauthorized` or
-`denied`, the packages have not been published publicly yet:
+Stop if selection fails. If an anonymous pull returns `unauthorized` or
+`denied`, ask the publisher for the publication record for the requested channel
+and both image names and tags, and ask them to confirm package visibility and
+pull access. The error alone does not establish publication status. After image
+selection succeeds, [compare both resolved references with the publication record](#check-publication-and-source).
+If no approved pair is available,
 [build images from your checkout](production-installation.md#build-and-publish-production-images)
 instead, or [start the local stack](../quickstart.md#start-the-local-stack)
 without image selections, which builds this checkout. The two aliases are not
@@ -120,7 +124,6 @@ to a private mirror. For local setup, export the resolved pair as
 ## Verify after installation
 
 The publication's startup checks do not establish a working Agent on your
-cluster. Finish [local first-Agent verification](../first-agent.md) or
-[production Agent verification](production-agents.md#verify-production-workloads).
+cluster. Complete [Agent model verification](../operate/model-verification.md).
 Keep the resolved image references with your deployment record so a later move
 of the selected alias does not change which images were selected for this installation.

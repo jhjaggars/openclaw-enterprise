@@ -2,7 +2,7 @@ import type {
   Preset,
   PresetLaunchSettings,
   PresetSummary,
-  PresetTemplate,
+  PresetDraftTemplate,
   PresetVariable,
   SecretMetadata,
 } from "@openclaw-enterprise/contracts";
@@ -154,7 +154,7 @@ const REFUSED_SETTING =
 // Where each variable went in configuration.values. A key that holds a variable is named by its
 // rendered text, as the API names it.
 function presetSettingVariables(
-  template: PresetTemplate,
+  template: PresetDraftTemplate,
   inputs: Record<string, string | number | boolean>,
 ): PresetSettingVariables {
   const found: PresetSettingVariables = [];
@@ -242,7 +242,7 @@ const NEW_SECRET = "new";
 const EXISTING_SECRET = "existing";
 const HARNESS_SECRET_TOKEN = /^\{\{\s*vars\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$/;
 
-function harnessSecretVariable(template: PresetTemplate) {
+function harnessSecretVariable(template: PresetDraftTemplate) {
   const value = responseFields(template.agent?.harnessAuth).secret;
   return typeof value === "string" ? HARNESS_SECRET_TOKEN.exec(value)?.[1] : undefined;
 }
@@ -250,7 +250,7 @@ function harnessSecretVariable(template: PresetTemplate) {
 // Only the variable that names the Agent (the whole agent.name is its token) is a one-line
 // input. Any other string may hold several lines (instructions, a workspace file), even when its
 // default is one line, so it keeps a textarea (UX plan C3; #1989).
-function singleLineVariable(template: PresetTemplate, name: string, value: string) {
+function singleLineVariable(template: PresetDraftTemplate, name: string, value: string) {
   const agentName = template.agent?.name;
   return (
     !/[\r\n]/.test(value) &&
@@ -368,7 +368,7 @@ export function createPresetFields(
       node.classList.toggle("button--primary", primary);
     }
   }
-  let selected: Pick<Preset, "name" | "template"> | undefined;
+  let selected: (Pick<Preset, "name"> & { template: PresetDraftTemplate }) | undefined;
   let fields: (VariableField | SecretField)[] = [];
   let loadVersion = 0;
   context.drafts.track("preset", (): PresetDraft | undefined =>
@@ -772,7 +772,8 @@ export function createPresetFields(
       applyUnavailable = false;
       describeApply();
       // Create Agent refused the setting these variables filled: its refusal shows under each,
-      // and focus moves to the first to change (finding 3122).
+      // and focus moves to the first to change (finding 3122). Focus scrolls only the field into
+      // view, so at phone width the refusal under it can start below the fold: it scrolls in too.
       const returned = refused?.draft.id === selectedId ? refused : undefined;
       refused = undefined;
       const marked = fields.filter(
@@ -781,7 +782,11 @@ export function createPresetFields(
       for (const field of marked) {
         setFieldError(field.input, returned?.refusal);
       }
-      marked[0]?.input.focus();
+      const first = marked[0]?.input;
+      if (first) {
+        first.focus();
+        document.getElementById(`${first.id}-error`)?.scrollIntoView({ block: "nearest" });
+      }
       if (applyDefault && fields.length === 0) {
         applyButton.click();
       }

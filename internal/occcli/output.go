@@ -17,8 +17,9 @@ import (
 )
 
 type column struct {
-	title string
-	key   string
+	title  string
+	key    string
+	format func(any) any
 }
 
 func (app *application) printNamespace(value any, collection bool) error {
@@ -51,17 +52,10 @@ func (app *application) printSecret(value any, collection bool) error {
 // and whether OCC stopped examining references. Structured output keeps the
 // full consumers object.
 func (app *application) printSecretDetail(value any) error {
-	if app.output == "table" {
-		if resource, ok := value.(map[string]any); ok {
-			row := maps.Clone(resource)
-			row["consumers"] = secretConsumersText(resource["consumers"])
-			value = row
-		}
-	}
 	return app.printItems(value, false, []column{
 		{title: "ID", key: "id"},
 		{title: "NAME", key: "name"},
-		{title: "CONSUMERS", key: "consumers"},
+		{title: "CONSUMERS", key: "consumers", format: secretConsumersText},
 	})
 }
 
@@ -250,22 +244,32 @@ func (app *application) printAgentRevisionList(rows []any) error {
 // deployment can still have disabled a selected plugin (PLUGIN_AUTH_REQUIRED,
 // PLUGIN_INSTALL_FAILED). The ERROR cell reads "CODE: message" (D608).
 // Structured output keeps the full error and warnings.
-func (app *application) printDeploymentStatus(value any) error {
-	if app.output == "table" {
-		if resource, ok := value.(map[string]any); ok {
-			row := maps.Clone(resource)
-			row["error"] = deploymentErrorText(resource["error"])
-			row["warnings"] = deploymentWarningsText(resource["warnings"])
-			value = row
-		}
-	}
-	return app.printItems(value, false, []column{
+func (app *application) printDeploymentStatus(value any, agent map[string]any) error {
+	columns := []column{
 		{title: "ID", key: "deploymentId"},
 		{title: "AGENT", key: "agentId"},
 		{title: "STATUS", key: "status"},
-		{title: "ERROR", key: "error"},
-		{title: "WARNINGS", key: "warnings"},
-	})
+		{title: "ERROR", key: "error", format: deploymentErrorText},
+		{title: "WARNINGS", key: "warnings", format: deploymentWarningsText},
+	}
+	row, ok := value.(map[string]any)
+	if !ok {
+		return app.printItems(value, false, columns)
+	}
+	if desired, ok := agent["desiredRuntimeState"].(string); ok {
+		if app.output == "table" {
+			active, _ := agent["activeRevisionId"].(string)
+			row["desiredRuntimeState"] = desired
+			row["activeRevisionId"] = cmp.Or(active, "none")
+			columns = append(columns, column{title: "DESIRED STATE", key: "desiredRuntimeState"}, column{title: "ACTIVE REVISION", key: "activeRevisionId"})
+		} else {
+			row["currentAgent"] = map[string]any{"desiredRuntimeState": desired, "activeRevisionId": agent["activeRevisionId"]}
+		}
+	}
+	if row["repositoryAccess"] != nil {
+		columns = append(columns, column{title: "REPOSITORY ACCESS", key: "repositoryAccess", format: deploymentErrorText})
+	}
+	return app.printItems(row, false, columns)
 }
 
 // deploymentErrorText renders a deployment error as "CODE: message" on one
@@ -427,24 +431,28 @@ func (app *application) printBrowsingItems(value any, collection bool, columns [
 			return app.printEmptyList()
 		}
 	}
-	rows := make([]any, 0, len(items))
 	hasError := false
 	for _, item := range items {
 		resource, ok := item.(map[string]any)
 		if !ok {
 			return fmt.Errorf("OCC returned an invalid resource")
 		}
-		row := maps.Clone(resource)
-		if readError, ok := resource["configurationReadError"].(map[string]any); ok {
-			row["configurationReadError"] = fmt.Sprintf("%s (%s)", displayValue(readError["code"]), displayValue(readError["field"]))
+		if _, ok := resource["configurationReadError"].(map[string]any); ok {
 			hasError = true
 		}
-		rows = append(rows, row)
 	}
 	if hasError {
-		columns = append(columns, column{title: "CONFIGURATION ERROR", key: "configurationReadError"})
+		columns = append(columns, column{title: "CONFIGURATION ERROR", key: "configurationReadError", format: configurationReadErrorText})
 	}
-	return printTable(app.out, rows, columns)
+	return printTable(app.out, items, columns)
+}
+
+func configurationReadErrorText(value any) any {
+	readError, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	return fmt.Sprintf("%s (%s)", displayValue(readError["code"]), displayValue(readError["field"]))
 }
 
 func (app *application) printStructured(value any) error {
@@ -474,11 +482,11 @@ func printTable(out io.Writer, items []any, columns []column) error {
 	}
 
 	writer := tabwriter.NewWriter(out, 0, 8, 2, ' ', 0)
-	headings := make([]string, len(columns))
+	cells := make([]string, len(columns))
 	for index, column := range columns {
-		headings[index] = column.title
+		cells[index] = column.title
 	}
-	if _, err := fmt.Fprintln(writer, strings.Join(headings, "\t")); err != nil {
+	if _, err := fmt.Fprintln(writer, strings.Join(cells, "\t")); err != nil {
 		return err
 	}
 	for _, item := range items {
@@ -486,11 +494,14 @@ func printTable(out io.Writer, items []any, columns []column) error {
 		if !ok {
 			return fmt.Errorf("OCC returned an invalid resource")
 		}
-		row := make([]string, len(columns))
 		for index, column := range columns {
-			row[index] = tableCell(resource[column.key])
+			value := resource[column.key]
+			if column.format != nil {
+				value = column.format(value)
+			}
+			cells[index] = tableCell(value)
 		}
-		if _, err := fmt.Fprintln(writer, strings.Join(row, "\t")); err != nil {
+		if _, err := fmt.Fprintln(writer, strings.Join(cells, "\t")); err != nil {
 			return err
 		}
 	}

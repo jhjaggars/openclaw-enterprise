@@ -14,7 +14,9 @@ import { failureSecrets, redactLogLine } from "../../scripts/ci/failure-redactio
 import { openShellProviderName } from "../../apps/controller/src/backends/openshell.ts";
 import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import { verifyOpenShellOwnerSession } from "../helpers/openshell-owner-session.mjs";
+import { localOpenShellGatewayOptions } from "../helpers/local-openshell-gateway.mjs";
 import { availablePort } from "../helpers/available-port.mjs";
+import { attachDevUpStartupDisposition } from "../helpers/dev-up-startup-disposition.ts";
 import { stopProcess } from "../helpers/stop-process.mjs";
 
 const { loadYaml } = createRequire(new URL("../../apps/controller/package.json", import.meta.url))(
@@ -46,8 +48,9 @@ async function startDevelopment(environment) {
       .map((line) => redactLogLine(line, secrets, 800))
       .join("\n");
     // Node's direct test reporter would print the raw subprocess output from a cause.
-    // eslint-disable-next-line preserve-caught-error
-    throw new Error(`OpenShell development startup failed:\n${tail}`);
+    const failure = new Error(`OpenShell development startup failed:\n${tail}`);
+    attachDevUpStartupDisposition(failure, error);
+    throw failure;
   }
 }
 
@@ -232,6 +235,9 @@ test(
         process.env.OCC_DEVELOPMENT_KUBERNETES_DISK_THRESHOLD_PERCENT ?? "1",
       OCC_DEVELOPMENT_STARTUP_TIMEOUT_SECONDS: "600",
     };
+    // This workflow must work without selecting static-inference enforcement.
+    delete environment.OCC_DEVELOPMENT_PROTECTED_EGRESS;
+    delete environment.OCC_DEVELOPMENT_OPENSHELL_HOST_GATEWAY_IP;
     delete environment.OCC_DEVELOPMENT_OPENSHELL_HELM_CHART;
     delete environment.OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART;
     delete environment.OCC_DEVELOPMENT_OPENSHELL_AGENT_SANDBOX_MANIFEST;
@@ -397,9 +403,8 @@ test(
     }
     assert.equal(typeof controllerImage, "string");
 
-    // The Gateway accepts unauthenticated development calls, so both halves of
-    // the NetworkPolicy boundary must deny arbitrary tenant Pods while retaining
-    // the OpenShell supervisor callback path.
+    // TLS authentication supplements NetworkPolicy: arbitrary tenant Pods still
+    // cannot connect, while supervisors retain their callback network path.
     assert.equal(
       await runGatewayProbe({
         directory: root,
@@ -412,7 +417,7 @@ test(
         labels: { "app.kubernetes.io/name": "untrusted-gateway-probe" },
       }),
       "Failed",
-      "an ordinary tenant Pod must not reach the unauthenticated Gateway",
+      "an ordinary tenant Pod must not reach the Gateway",
     );
     assert.equal(
       await runGatewayProbe({
@@ -482,13 +487,52 @@ test(
     });
     t.after(() => stopProcess(forward));
     await waitForPort(forward, gatewayPort, () => forwardError);
-    const gateway = new GrpcOpenShellGatewayClient({
-      endpoint: `http://127.0.0.1:${gatewayPort}`,
-      auth: { mode: "unauthenticated" },
-    });
+    const options = await localOpenShellGatewayOptions(
+      t,
+      kubectl,
+      environment,
+      "oce-system",
+      gatewayPort,
+    );
+    const gateway = new GrpcOpenShellGatewayClient(options);
     t.after(() => gateway.close());
     const workspace = await gateway.getWorkspace(namespace, AbortSignal.timeout(10_000));
     assert.equal(workspace?.name, namespace);
+    // The same live endpoint trusts its CA but rejects a caller without a client
+    // identity. The successful call above rules out readiness/network failures.
+    const anonymous = new GrpcOpenShellGatewayClient({
+      endpoint: options.endpoint,
+      rootCertificatePath: options.rootCertificatePath,
+      auth: { mode: "unauthenticated" },
+    });
+    try {
+      // Identity refusals keep grpc-js's raw UNAUTHENTICATED status code.
+      await assert.rejects(anonymous.getWorkspace(namespace, AbortSignal.timeout(10_000)), {
+        code: 16,
+      });
+    } finally {
+      anonymous.close();
+    }
+    assert.ok(!state.protectedEgress, "default startup must not select static inference");
+    const gatewayConfig = JSON.parse(
+      (
+        await execute(
+          "kubectl",
+          [
+            ...kubectl,
+            "get",
+            "configmap",
+            "openshell-gateway-config",
+            "-n",
+            "oce-system",
+            "-o",
+            "json",
+          ],
+          { env: environment },
+        )
+      ).stdout,
+    );
+    assert.ok(!gatewayConfig.data["gateway.toml"].includes("oce-authority"));
     assert.equal(workspace?.labels["app.kubernetes.io/managed-by"], "openclaw-enterprise");
     assert.equal(
       workspace?.labels["openclaw.dev/namespace-id"],
