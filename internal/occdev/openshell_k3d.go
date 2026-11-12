@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -145,7 +146,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 		state.NativeAdminDomain = agentDomain
 	}
 	if signIn == developmentSignInKeycloak {
-		if err := checkDevelopmentKeycloakHostPort(fmt.Sprintf("127.0.0.1:%d", developmentKeycloakHostPort)); err != nil {
+		if err := checkDevelopmentKeycloakHostPort(net.JoinHostPort(developmentKeycloakBindAddress(), strconv.Itoa(developmentKeycloakHostPort))); err != nil {
 			return err
 		}
 		if _, _, err := readDevelopmentKeycloakFixtures(opts.Repository); err != nil {

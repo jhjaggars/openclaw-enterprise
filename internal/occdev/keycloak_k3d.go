@@ -82,11 +82,26 @@ func developmentKeycloakIssuer(cluster string) string {
 	return "https://" + developmentKeycloakHost(cluster) + "/realms/" + developmentKeycloakRealm
 }
 
-// developmentKeycloakPortArgs publishes host loopback 443 to the Keycloak
+// developmentKeycloakBindAddress selects the loopback address the host
+// port 443 publication binds. The default keeps 127.0.0.1; a host whose
+// loopback 443 is already served can move only this publication to another
+// 127.0.0.0/8 address without changing the issuer or the cluster ports.
+func developmentKeycloakBindAddress() string {
+	if value := os.Getenv("OCC_DEVELOPMENT_KEYCLOAK_BIND"); value != "" {
+		address, err := netip.ParseAddr(value)
+		if err != nil || !address.IsLoopback() || !address.Is4() || address.String() != value {
+			return "127.0.0.1"
+		}
+		return value
+	}
+	return "127.0.0.1"
+}
+
+// developmentKeycloakPortArgs publishes a host loopback 443 to the Keycloak
 // Gateway. k3d fixes port maps at creation, so the profile cannot be added to
 // a running cluster.
 func developmentKeycloakPortArgs() []string {
-	return []string{"--port", fmt.Sprintf("127.0.0.1:%d:%d@loadbalancer", developmentKeycloakHostPort, developmentKeycloakNodePort)}
+	return []string{"--port", fmt.Sprintf("%s:%d:%d@loadbalancer", developmentKeycloakBindAddress(), developmentKeycloakHostPort, developmentKeycloakNodePort)}
 }
 
 // developmentRoutingCA names the chart's private gateway-routing CA: the
@@ -112,7 +127,7 @@ func checkDevelopmentKeycloakHostPort(address string) error {
 // developmentKeycloakPublished reports whether `<engine> port` output for the
 // k3d load balancer's Keycloak port includes the host loopback 443 binding.
 func developmentKeycloakPublished(output []byte) bool {
-	want := fmt.Sprintf("127.0.0.1:%d", developmentKeycloakHostPort)
+	want := fmt.Sprintf("%s:%d", developmentKeycloakBindAddress(), developmentKeycloakHostPort)
 	for _, line := range strings.Split(string(output), "\n") {
 		if strings.TrimSpace(line) == want {
 			return true
@@ -493,7 +508,7 @@ func (r *runner) installDevelopmentKeycloak(ctx context.Context, state *developm
 	}
 	// Discovery through the host publication proves the whole chain: k3d port,
 	// NodePort, Envoy listener and certificate, route and Keycloak.
-	fmt.Fprintln(r.opts.Out, "Waiting for Keycloak discovery through 127.0.0.1:443...")
+	fmt.Fprintf(r.opts.Out, "Waiting for Keycloak discovery through %s:%d...\n", developmentKeycloakBindAddress(), developmentKeycloakHostPort)
 	if err := waitDevelopmentKeycloakDiscovery(ctx, client, state.Cluster, timeout); err != nil {
 		return secrets, nil, err
 	}
@@ -508,7 +523,7 @@ func developmentKeycloakHostClient(cluster string, ca []byte) (*http.Client, err
 	if !pool.AppendCertsFromPEM(ca) {
 		return nil, fmt.Errorf("invalid gateway CA certificate")
 	}
-	address := fmt.Sprintf("127.0.0.1:%d", developmentKeycloakHostPort)
+	address := fmt.Sprintf("%s:%d", developmentKeycloakBindAddress(), developmentKeycloakHostPort)
 	host := developmentKeycloakHost(cluster)
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
@@ -991,13 +1006,13 @@ func developmentKeycloakInstructions(state *developmentState) string {
   Keycloak user: %s
   Keycloak password file: %s
   Trust in the browser: %s (Console) and %s (Keycloak)
-  Add to /etc/hosts: 127.0.0.1 %s
+  Add to /etc/hosts: %s %s
   Keycloak issuer: %s
   Keycloak administrator password file: %s
   Password sign-in is for the recovery account (the administrator) only.
 `, developmentBrowserOrigin(consoleHost, state.BrowserPort), developmentKeycloakSignInName, developmentKeycloakSignInUser,
 		filepath.Join(state.directory, "keycloak-alice-password"),
 		filepath.Join(state.directory, "browser-ca.crt"), filepath.Join(state.directory, "gateway-ca.crt"),
-		developmentKeycloakHost(state.Cluster), developmentKeycloakIssuer(state.Cluster),
+		developmentKeycloakBindAddress(), developmentKeycloakHost(state.Cluster), developmentKeycloakIssuer(state.Cluster),
 		filepath.Join(state.directory, "keycloak-admin-password"))
 }
